@@ -1,0 +1,160 @@
+{
+ "actions": [],
+ "autoname": "field:customer",
+ "creation": "2026-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "customer",
+  "file_type",
+  "column_break_1",
+  "parsing_mode",
+  "pdf_parser_key",
+  "layout",
+  "section_break_1",
+  "header_row",
+  "sheet_name",
+  "column_mapping",
+  "wide_layout_section",
+  "item_code_column",
+  "item_name_column",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "file_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "File Type",
+   "options": "PDF\nExcel\nCSV",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "LLM Extraction",
+   "description": "LLM Extraction: an AI reads the file and figures out the layout - no setup needed, and it self-promotes to Template Mapping automatically once it can reliably reproduce the same result deterministically. Template Mapping: fixed, hand-configured column mapping / layout below - fast and free, no AI calls, but has to be set up (or learned) once per customer.",
+   "fieldname": "parsing_mode",
+   "fieldtype": "Select",
+   "label": "Parsing Mode",
+   "options": "LLM Extraction\nTemplate Mapping",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.file_type == 'PDF' && doc.parsing_mode == 'Template Mapping'",
+   "description": "A hand-written parser function registered in PDF_PARSER_REGISTRY for this customer's exact layout.",
+   "fieldname": "pdf_parser_key",
+   "fieldtype": "Data",
+   "label": "Legacy PDF Parser Key"
+  },
+  {
+   "default": "Long",
+   "depends_on": "eval:doc.file_type != 'PDF' && doc.parsing_mode == 'Template Mapping'",
+   "description": "Long: one row per item + delivery date (most CSV exports). Wide: one row per item, with a separate column for every week - and a Firm/Forecast band row above the date header (typical automotive weekly-bucket schedules).",
+   "fieldname": "layout",
+   "fieldtype": "Select",
+   "label": "Layout",
+   "options": "Long\nWide (Weekly Columns)",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.file_type != 'PDF' && doc.parsing_mode == 'Template Mapping'",
+   "fieldname": "section_break_1",
+   "fieldtype": "Section Break",
+   "label": "Template Mapping (Excel / CSV)"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.file_type != 'PDF' && doc.parsing_mode == 'Template Mapping'",
+   "description": "Wide layout: the row with the actual column headers (item code, week dates, etc.) - NOT the Firm/Forecast band row above it.",
+   "fieldname": "header_row",
+   "fieldtype": "Int",
+   "label": "Header Row Number"
+  },
+  {
+   "depends_on": "eval:doc.file_type == 'Excel'",
+   "description": "Used for both Template Mapping and LLM Extraction.",
+   "fieldname": "sheet_name",
+   "fieldtype": "Data",
+   "label": "Sheet Name (Excel only, blank = first sheet)"
+  },
+  {
+   "depends_on": "eval:doc.file_type != 'PDF' && doc.layout == 'Long' && doc.parsing_mode == 'Template Mapping'",
+   "fieldname": "column_mapping",
+   "fieldtype": "Table",
+   "label": "Column Mapping",
+   "options": "Schedule Column Mapping"
+  },
+  {
+   "depends_on": "eval:doc.file_type != 'PDF' && doc.layout == 'Wide (Weekly Columns)' && doc.parsing_mode == 'Template Mapping'",
+   "fieldname": "wide_layout_section",
+   "fieldtype": "Section Break",
+   "label": "Wide Layout Settings"
+  },
+  {
+   "default": "PN",
+   "depends_on": "eval:doc.layout == 'Wide (Weekly Columns)' && doc.parsing_mode == 'Template Mapping'",
+   "description": "Exact header text of the item/part code column (e.g. 'PN', 'Part Number').",
+   "fieldname": "item_code_column",
+   "fieldtype": "Data",
+   "label": "Item Code Column Header"
+  },
+  {
+   "depends_on": "eval:doc.layout == 'Wide (Weekly Columns)' && doc.parsing_mode == 'Template Mapping'",
+   "description": "Optional. Leave blank if the file has no separate item-description column.",
+   "fieldname": "item_name_column",
+   "fieldtype": "Data",
+   "label": "Item Name Column Header (optional)"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Schedule Planner",
+ "name": "Customer Schedule Format",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

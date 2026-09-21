@@ -1,0 +1,182 @@
+{
+ "actions": [],
+ "creation": "2026-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "material_request_trigger_mode",
+  "mr_schedule_frequency",
+  "last_scheduled_mr_run",
+  "column_break_1",
+  "default_lead_time_months",
+  "default_planning_months",
+  "default_company",
+  "default_warehouse",
+  "section_break_2",
+  "overdue_grace_days",
+  "enable_shipping_fallback_forecast",
+  "column_break_3",
+  "shipping_fallback_months",
+  "last_mr_reconciled_on",
+  "section_break_1",
+  "llm_provider",
+  "llm_model",
+  "column_break_2",
+  "llm_api_key",
+  "llm_endpoint"
+ ],
+ "fields": [
+  {
+   "default": "Immediate",
+   "fieldname": "material_request_trigger_mode",
+   "fieldtype": "Select",
+   "label": "Material Request Trigger Mode",
+   "options": "Immediate\nScheduled",
+   "reqd": 1
+  },
+  {
+   "default": "Daily",
+   "depends_on": "eval:doc.material_request_trigger_mode == 'Scheduled'",
+   "fieldname": "mr_schedule_frequency",
+   "fieldtype": "Select",
+   "label": "Scheduled Run Frequency",
+   "options": "Daily\nWeekly"
+  },
+  {
+   "depends_on": "eval:doc.material_request_trigger_mode == 'Scheduled'",
+   "fieldname": "last_scheduled_mr_run",
+   "fieldtype": "Date",
+   "label": "Last Scheduled Run",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "7",
+   "description": "Default parts lead time used both for auto-forecast horizon and Material Request required-by date.",
+   "fieldname": "default_lead_time_months",
+   "fieldtype": "Int",
+   "label": "Default Lead Time (Months)",
+   "reqd": 1
+  },
+  {
+   "default": "12",
+   "fieldname": "default_planning_months",
+   "fieldtype": "Int",
+   "label": "Default Material Request Planning Horizon (Months)",
+   "reqd": 1
+  },
+  {
+   "fieldname": "default_company",
+   "fieldtype": "Link",
+   "label": "Default Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "default_warehouse",
+   "fieldtype": "Link",
+   "label": "Default Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "description": "Every reconciliation run (schedule submit/cancel, a shipment without a schedule, or the scheduled batch) recomputes net requirement across ALL customers for every item and keeps ONE live Draft \"Auto Material Request\" in sync - adding items that just went short, raising/lowering quantities as demand changes, and removing/cancelling items or the whole MR once they're no longer short. It always nets against current stock, any open Purchase Order already placed, and any other open Material Request for that item first, so it never asks for more than is actually needed.",
+   "fieldname": "section_break_2",
+   "fieldtype": "Section Break",
+   "label": "Material Request Reconciliation"
+  },
+  {
+   "default": "30",
+   "description": "A Firm delivery date up to this many days in the past still counts as required (in case it genuinely hasn't shipped yet) rather than silently dropping out of demand the day it's due.",
+   "fieldname": "overdue_grace_days",
+   "fieldtype": "Int",
+   "label": "Overdue Grace Period (Days)",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "If an item has real shipping history (Delivery Note) in the last few months but no active Customer Schedule covering it right now (e.g. the customer never sends a formal schedule, or it lapsed), forecast its demand from shipping history anyway so it doesn't silently fall out of Material Request planning.",
+   "fieldname": "enable_shipping_fallback_forecast",
+   "fieldtype": "Check",
+   "label": "Fall Back to Shipping History When No Schedule Exists"
+  },
+  {
+   "fieldname": "column_break_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "3",
+   "depends_on": "eval:doc.enable_shipping_fallback_forecast",
+   "description": "How many months of past shipments to average when falling back to shipping history for an item with no active schedule.",
+   "fieldname": "shipping_fallback_months",
+   "fieldtype": "Int",
+   "label": "Shipping History Window (Months)"
+  },
+  {
+   "fieldname": "last_mr_reconciled_on",
+   "fieldtype": "Datetime",
+   "label": "Last Reconciled On",
+   "read_only": 1
+  },
+  {
+   "description": "Used to auto-read PDF/Excel/CSV schedules for any customer whose Customer Schedule Format is still on \"LLM Extraction\" (the default for every new customer). Once a customer's layout is learned or configured, their files parse without calling the AI at all - so this only runs occasionally, not on every upload. Local (Ollama) runs entirely on your own server - no API key, no internet dependency, and no risk of a cloud provider retiring a model name under you.",
+   "fieldname": "section_break_1",
+   "fieldtype": "Section Break",
+   "label": "AI-Based Schedule Extraction"
+  },
+  {
+   "default": "Local (Ollama)",
+   "description": "Local (Ollama): runs on your own bench server via Ollama (https://ollama.com) - free, offline, no API key, and no cloud provider ever retiring a model name on you. Needs Ollama installed and a model pulled (see README). Google Gemini and Groq offer a genuinely free hosted API tier (get a key at aistudio.google.com or console.groq.com, no card needed) if you'd rather not self-host. Anthropic and OpenAI are paid from the first call. Whichever you pick, this is only used for customers still on \"LLM Extraction\".",
+   "fieldname": "llm_provider",
+   "fieldtype": "Select",
+   "label": "Provider",
+   "options": "Local (Ollama)\nGoogle Gemini\nGroq\nAnthropic\nOpenAI\nNone"
+  },
+  {
+   "description": "Leave blank for a sensible default per provider: Local (Ollama) -> qwen2.5:3b-instruct (small/CPU-friendly - use a bigger one like llama3.1:8b-instruct-q4_K_M or qwen2.5:7b-instruct if your server has more RAM or a GPU), Google Gemini -> gemini-2.5-flash-lite (try gemini-3.6-flash for Google's newer model), Groq -> llama-3.3-70b-versatile, Anthropic -> claude-sonnet-4-5, OpenAI -> gpt-4o. Hosted providers retire model names over time - if extraction starts failing with a 'model not found' error, check the provider's current model list and set the new name here.",
+   "fieldname": "llm_model",
+   "fieldtype": "Data",
+   "label": "Model"
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Not needed for Local (Ollama) - leave blank.",
+   "fieldname": "llm_api_key",
+   "fieldtype": "Password",
+   "label": "API Key"
+  },
+  {
+   "description": "Leave blank to use the provider's default endpoint - for Local (Ollama) that's http://localhost:11434/v1/chat/completions (change only if Ollama runs on a different host/port).",
+   "fieldname": "llm_endpoint",
+   "fieldtype": "Data",
+   "label": "Endpoint Override"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Schedule Planner",
+ "name": "Schedule Planning Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

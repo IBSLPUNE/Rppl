@@ -1,0 +1,96 @@
+{
+ "actions": [],
+ "creation": "2026-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "delivery_date",
+  "demand_type",
+  "column_break_1",
+  "old_qty",
+  "new_qty",
+  "change",
+  "change_pct",
+  "section_break_1",
+  "previous_schedule",
+  "revision_date"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item Code",
+   "options": "Item"
+  },
+  {
+   "fieldname": "delivery_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Delivery Date"
+  },
+  {
+   "fieldname": "demand_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Demand Type",
+   "options": "Firm\nForecast"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "old_qty",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Old Qty"
+  },
+  {
+   "fieldname": "new_qty",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "New Qty"
+  },
+  {
+   "fieldname": "change",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Change"
+  },
+  {
+   "fieldname": "change_pct",
+   "fieldtype": "Float",
+   "label": "Change %"
+  },
+  {
+   "fieldname": "section_break_1",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "previous_schedule",
+   "fieldtype": "Link",
+   "label": "Previous Schedule",
+   "options": "Customer Schedule"
+  },
+  {
+   "fieldname": "revision_date",
+   "fieldtype": "Date",
+   "label": "Revision Date"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Schedule Planner",
+ "name": "Schedule Revision Log",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

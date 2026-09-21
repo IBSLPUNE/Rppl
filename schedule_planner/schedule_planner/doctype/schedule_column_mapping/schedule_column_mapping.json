@@ -1,0 +1,40 @@
+{
+ "actions": [],
+ "creation": "2026-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "source_column",
+  "target_field"
+ ],
+ "fields": [
+  {
+   "fieldname": "source_column",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Source Column Header",
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_field",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Maps To",
+   "options": "item_code\nitem_name\ndelivery_date\nquantity\ndemand_type",
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Schedule Planner",
+ "name": "Schedule Column Mapping",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

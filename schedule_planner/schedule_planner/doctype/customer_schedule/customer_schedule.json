@@ -1,0 +1,167 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "customer",
+  "supplier_vendor",
+  "release_number",
+  "column_break_1",
+  "schedule_date",
+  "schedule_format",
+  "source_file",
+  "status",
+  "schedule_lines_section",
+  "schedule_items",
+  "revision_log_tab",
+  "revision_log",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Naming Series",
+   "options": "CUST-SCH-.YYYY.-"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1
+  },
+  {
+   "fieldname": "supplier_vendor",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Supplier/Vendor Code (as printed on the schedule)"
+  },
+  {
+   "fieldname": "release_number",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Release Number"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "schedule_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Schedule Date"
+  },
+  {
+   "fieldname": "schedule_format",
+   "fieldtype": "Link",
+   "label": "Schedule Format Used",
+   "options": "Customer Schedule Format",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_file",
+   "fieldtype": "Attach",
+   "label": "Source File (PDF / Excel / CSV)"
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nSubmitted\nProcessed\nCancelled",
+   "read_only": 1
+  },
+  {
+   "fieldname": "schedule_lines_section",
+   "fieldtype": "Section Break",
+   "label": "Schedule Lines"
+  },
+  {
+   "fieldname": "schedule_items",
+   "fieldtype": "Table",
+   "label": "Schedule Items",
+   "options": "Customer Schedule Item"
+  },
+  {
+   "fieldname": "revision_log_tab",
+   "fieldtype": "Tab Break",
+   "label": "Revision Log"
+  },
+  {
+   "fieldname": "revision_log",
+   "fieldtype": "Table",
+   "label": "Revision Log",
+   "options": "Schedule Revision Log",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Customer Schedule",
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Schedule Planner",
+ "name": "Customer Schedule",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager",
+   "share": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
