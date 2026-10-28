@@ -31,6 +31,8 @@ from datetime import datetime
 import frappe
 from frappe.utils import getdate
 
+from schedule_planner.utils import layout_parsers
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -47,10 +49,24 @@ def extract_header_and_rows(file_url, customer):
 		header = _parse_pdf_header(text, customer)
 		if fmt.parsing_mode == "Template Mapping" and fmt.pdf_parser_key:
 			rows = _parse_pdf_with_registry(text, fmt.pdf_parser_key)
+			known = layout_parsers.parse_by_key(fmt.pdf_parser_key, text)
+			if known and known[1]:
+				header, rows = known
 		else:
-			rows = _parse_pdf_with_llm(text)
+			# Known layouts are read by plain code - free, instant, no AI.
+			# Only a layout we have never seen goes to the AI.
+			known = layout_parsers.parse_known_pdf(text)
+			if known:
+				_key, label, header, rows = known
+				frappe.msgprint(f"Recognised layout: {label}. Read without AI.", alert=True, indicator="green")
+			else:
+				rows = _parse_pdf_with_llm(text)
 	elif fmt.parsing_mode == "LLM Extraction":
-		header, rows = _llm_infer_and_extract_tabular(file_path, fmt, customer)
+		known = _try_known_tabular(file_path, fmt, customer)
+		if known:
+			header, rows = known
+		else:
+			header, rows = _llm_infer_and_extract_tabular(file_path, fmt, customer)
 	elif fmt.layout == "Wide (Weekly Columns)":
 		header, rows = _parse_wide(file_path, fmt, customer)
 	else:
@@ -232,6 +248,8 @@ def _normalise_demand_type(raw):
 	raw_l = raw.lower()
 	if "firm" in raw_l:
 		return "Firm"
+	if "fabrication" in raw_l or "raw material" in raw_l:
+		return "Forecast"  # commitment tiers below Firm are planning demand
 	if "forecast" in raw_l or "plan" in raw_l:
 		return "Forecast"
 	if "raw" in raw_l:
@@ -326,7 +344,7 @@ def _extract_wide_header(raw, header_row_idx, customer):
 	number when nothing is found - the duplicate-schedule check still works
 	fine off the auto-generated release number."""
 
-	schedule_date = getdate()
+	schedule_date = None
 	for r in range(0, header_row_idx):
 		row_vals = list(raw.iloc[r])
 		for i, v in enumerate(row_vals):
@@ -336,11 +354,32 @@ def _extract_wide_header(raw, header_row_idx, customer):
 				if candidate:
 					schedule_date = candidate
 
+	found_date = schedule_date is not None
+	schedule_date = schedule_date or getdate()
 	return {
-		"release_number": f"AUTO-{frappe.generate_hash(length=8)}",
+		# Last week column printed in the sheet (zero weeks included) - the
+		# forecast engine needs it to know where the customer's horizon ends.
+		"horizon_end": _wide_horizon_end(raw, header_row_idx),
+		# A date printed on the sheet identifies the release, so uploading the
+		# same file twice is caught as a duplicate; otherwise a random id.
+		"release_number": (
+			f"{customer}-{schedule_date:%Y%m%d}"[:140] if found_date else f"AUTO-{frappe.generate_hash(length=8)}"
+		),
 		"supplier_vendor": customer,
 		"schedule_date": str(schedule_date),
 	}
+
+
+def _wide_horizon_end(raw, header_row_idx):
+	latest = None
+	for value in list(raw.iloc[header_row_idx]):
+		text = str(value).strip().lower()
+		if not text or text in ("nan", "past due"):
+			continue
+		parsed = _to_date(value)
+		if parsed and (latest is None or parsed > latest):
+			latest = parsed
+	return str(latest) if latest else None
 
 
 def _rows_from_wide(raw, header_row_idx, fmt):
@@ -451,9 +490,14 @@ def _extract_pdf_text(file_path):
 
 
 def _parse_pdf_header(text, customer):
-	release_match = re.search(r"Release\s*#[:\s]*(\S+)", text, re.IGNORECASE)
+	release_match = re.search(r"Release\s*(?:#|Number|No\.?)\s*[:\s]*(\S+)", text, re.IGNORECASE)
 	vendor_match = re.search(r"Vendor\s*[:#]\s*(\S+)", text, re.IGNORECASE)
-	issue_date_match = re.search(r"Issue Date\s*:\s*([\d/]+)", text, re.IGNORECASE)
+	# "Issue Date:", "Release Date :" or the bare "Date:" printed next to the release number
+	issue_date_match = (
+		re.search(r"Issue Date\s*:\s*([\d/]+)", text, re.IGNORECASE)
+		or re.search(r"Release Date\s*:\s*([\d/]+)", text, re.IGNORECASE)
+		or re.search(r"Release\s*#[^\n]*?\bDate\s*:\s*([\d/]+)", text, re.IGNORECASE)
+	)
 
 	schedule_date = getdate()
 	if issue_date_match:
@@ -581,6 +625,8 @@ def _parse_pdf_techform_v1(text):
 
 PDF_PARSER_REGISTRY = {
 	"techform_v1": _parse_pdf_techform_v1,
+	# Built-in layouts (also recognised automatically, see layout_parsers.py)
+	**{key: (lambda text, _key=key: (layout_parsers.parse_by_key(_key, text) or (None, []))[1]) for key, *_ in layout_parsers.KNOWN_PDF_LAYOUTS},
 }
 
 
@@ -597,7 +643,8 @@ prose, no markdown fences) where each element is:
 Rules:
 - One element per (item, delivery date) line with a positive quantity.
 - "Firm" = confirmed/committed demand the customer will definitely take.
-- "Forecast" (or "Raw"/planning data) = tentative future demand.
+- "Forecast" (or "Raw"/planning data) = tentative future demand. Authorisation \
+tiers named "Fabrication" or "Raw Material" are also "Forecast".
 - If demand type is not labelled at all, use "Forecast".
 - Skip rows with zero or blank quantity.
 - Dates must be normalised to YYYY-MM-DD.
@@ -842,6 +889,56 @@ def _parse_pdf_with_llm(text):
 
 
 # ---------------------------------------------------------------------------
+# Excel / CSV - recognise ordinary layouts without the AI
+# ---------------------------------------------------------------------------
+
+def _try_known_tabular(file_path, fmt, customer):
+	"""Weekly-column ("Wide") sheets and plain Long tables are recognised from
+	their headers and read by the deterministic parsers - no AI. Returns
+	(header, rows) or None when nothing recognisable is found (the caller then
+	falls back to AI extraction). Never raises."""
+
+	try:
+		raw = _read_raw_no_header(file_path, fmt)
+		grid = [list(r) for r in raw.head(60).itertuples(index=False, name=None)]
+
+		wide = layout_parsers.find_wide_layout(grid)
+		if wide:
+			trial = frappe._dict(
+				file_type=fmt.file_type,
+				sheet_name=fmt.sheet_name,
+				header_row=wide["header_row"],
+				item_code_column=wide["item_code_column"],
+				item_name_column=wide["item_name_column"],
+				column_mapping=[],
+			)
+			header, rows = _parse_wide(file_path, trial, customer)
+			if rows:
+				frappe.msgprint("Recognised a weekly-column layout. Read without AI.", alert=True, indicator="green")
+				return header, rows
+
+		for header_row in range(1, 11):
+			trial = frappe._dict(
+				file_type=fmt.file_type,
+				sheet_name=fmt.sheet_name,
+				header_row=header_row,
+				item_code_column=None,
+				item_name_column=None,
+				column_mapping=[],
+			)
+			try:
+				rows = _parse_tabular(file_path, trial)
+			except Exception:
+				continue
+			if rows:
+				frappe.msgprint("Recognised a one-row-per-date layout. Read without AI.", alert=True, indicator="green")
+				return _default_header(customer, file_path), rows
+	except Exception:
+		return None
+	return None
+
+
+# ---------------------------------------------------------------------------
 # Excel / CSV - LLM-based extraction with self-learning template promotion.
 #
 # On a customer's first upload (or any upload while parsing_mode is still
@@ -886,7 +983,8 @@ empty for Wide)
 Rules:
 - One row element per (item, delivery date) with a positive quantity.
 - "Firm" = confirmed/committed demand. "Forecast"/"Raw" = tentative/planning \
-demand. If not labelled at all, use "Forecast".
+demand ("Fabrication" and "Raw Material" tiers count as "Forecast"). If not \
+labelled at all, use "Forecast".
 - A column/cell literally labelled "Past Due" is already-due quantity - treat \
 it as an immediate "Firm" row with today's date, not a future week.
 - For a Wide layout, a Firm/Forecast band row sits directly above the header \

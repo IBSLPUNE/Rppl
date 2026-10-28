@@ -56,8 +56,88 @@ def _default_warehouse(company):
 	return warehouse
 
 
-def _item_rate(item_code):
-	return frappe.db.get_value("Item", item_code, "standard_rate") or 0
+def _item_rate(item_code, ctx=None):
+	"""Selling rate in the Sales Order's own currency. Item.standard_rate is
+	kept in company currency, so for a foreign-currency customer a rate from
+	the customer's Selling Price List (in that currency) is preferred, and
+	otherwise standard_rate is converted with the order's exchange rate."""
+
+	standard = flt(frappe.db.get_value("Item", item_code, "standard_rate"))
+	if not ctx or ctx["currency"] == ctx["company_currency"]:
+		return standard
+
+	if ctx.get("price_list"):
+		price = frappe.db.get_value(
+			"Item Price",
+			{"item_code": item_code, "price_list": ctx["price_list"], "selling": 1, "currency": ctx["currency"]},
+			"price_list_rate",
+		)
+		if price:
+			return flt(price)
+
+	rate = flt(ctx["conversion_rate"]) or 1.0
+	return round(standard / rate, 6)
+
+
+def _currency_context(customer, company, transaction_date):
+	"""Currency the Sales Order must be made in. ERPNext refuses an order whose
+	currency differs from the customer's party account currency ("Accounting
+	Entry for Customer ... can only be made in currency: USD"), and when the
+	document is created from code nothing fills the currency in as the form
+	does - so work it out here."""
+
+	company_currency = frappe.get_cached_value("Company", company, "default_currency")
+	currency = None
+	try:
+		from erpnext.accounts.party import get_party_account_currency
+
+		currency = get_party_account_currency("Customer", customer, company)
+	except Exception:
+		pass
+	currency = currency or frappe.db.get_value("Customer", customer, "default_currency") or company_currency
+
+	ctx = {
+		"currency": currency,
+		"company_currency": company_currency,
+		"conversion_rate": 1.0,
+		"price_list": None,
+	}
+	if currency == company_currency:
+		return ctx
+
+	from erpnext.setup.utils import get_exchange_rate
+
+	rate = flt(get_exchange_rate(currency, company_currency, transaction_date))
+	if not rate:
+		frappe.throw(
+			f"No exchange rate found for {currency} to {company_currency}. Add a Currency Exchange "
+			f"record for {currency} -> {company_currency} (Accounts > Currency Exchange) and submit the "
+			f"schedule again. Customer {customer} is billed in {currency}.",
+			title="Exchange Rate Missing",
+		)
+	ctx["conversion_rate"] = rate
+
+	# Customer's own price list, then its group's, then Selling Settings - used
+	# only when it is priced in the same currency as the order.
+	candidates = [frappe.db.get_value("Customer", customer, "default_price_list")]
+	group = frappe.db.get_value("Customer", customer, "customer_group")
+	if group:
+		candidates.append(frappe.db.get_value("Customer Group", group, "default_price_list"))
+	candidates.append(frappe.db.get_single_value("Selling Settings", "selling_price_list"))
+	for name in candidates:
+		if name and frappe.db.get_value("Price List", name, "currency") == currency:
+			ctx["price_list"] = name
+			break
+	return ctx
+
+
+def _apply_currency(so, ctx):
+	so.currency = ctx["currency"]
+	so.conversion_rate = ctx["conversion_rate"]
+	if ctx["price_list"]:
+		so.selling_price_list = ctx["price_list"]
+		so.price_list_currency = ctx["currency"]
+		so.plc_conversion_rate = ctx["conversion_rate"]
 
 
 def _item_name(item_code):
@@ -123,14 +203,14 @@ def _sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse):
 		row.linked_sales_order = so_name
 
 
-def _append_so_items(so, new_items, warehouse, delivery_date):
+def _append_so_items(so, new_items, warehouse, delivery_date, ctx=None):
 	for item_code, qty in new_items.items():
 		so.append(
 			"items",
 			{
 				"item_code": item_code,
 				"qty": qty,
-				"rate": _item_rate(item_code),
+				"rate": _item_rate(item_code, ctx),
 				"warehouse": warehouse,
 				"delivery_date": delivery_date,
 			},
@@ -147,7 +227,9 @@ def _create_sales_order(doc, delivery_date, new_items, company, warehouse):
 	so.custom_sp_delivery_date = delivery_date
 	so.custom_sp_customer_schedule = doc.name
 
-	_append_so_items(so, new_items, warehouse, delivery_date)
+	ctx = _currency_context(doc.customer, company, so.transaction_date)
+	_apply_currency(so, ctx)
+	_append_so_items(so, new_items, warehouse, delivery_date, ctx)
 
 	so.insert(ignore_permissions=True)
 	so.submit()
@@ -171,7 +253,9 @@ def _amend_sales_order(existing_name, doc, delivery_date, new_items, company, wa
 	amended.custom_sp_customer_schedule = doc.name
 	amended.items = []
 
-	_append_so_items(amended, new_items, warehouse, delivery_date)
+	ctx = _currency_context(doc.customer, company, amended.transaction_date)
+	_apply_currency(amended, ctx)
+	_append_so_items(amended, new_items, warehouse, delivery_date, ctx)
 
 	amended.insert(ignore_permissions=True)
 	amended.submit()

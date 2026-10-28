@@ -53,6 +53,9 @@ def execute(filters=None):
 				"other_open_mr_qty": r["other_open_mr_qty"],
 				"net_shortfall": r["net_shortfall"],
 				"net_surplus": r["net_surplus"],
+				"min_order_qty": r["min_order_qty"],
+				"order_qty": r["order_qty"],
+				"moq_extra": r["moq_extra"],
 				"auto_mr_qty": r["auto_mr_qty"],
 				"status": r["status"],
 			}
@@ -68,6 +71,9 @@ def execute(filters=None):
 		{"label": _("Other Open MR Qty"), "fieldname": "other_open_mr_qty", "fieldtype": "Float", "width": 130},
 		{"label": _("Net Shortfall"), "fieldname": "net_shortfall", "fieldtype": "Float", "width": 110},
 		{"label": _("Net Surplus"), "fieldname": "net_surplus", "fieldtype": "Float", "width": 100},
+		{"label": _("Min Order Qty"), "fieldname": "min_order_qty", "fieldtype": "Float", "width": 110},
+		{"label": _("Order Qty (after MOQ)"), "fieldname": "order_qty", "fieldtype": "Float", "width": 140},
+		{"label": _("Extra Due To MOQ"), "fieldname": "moq_extra", "fieldtype": "Float", "width": 120},
 		{"label": _("On Live Auto MR"), "fieldname": "auto_mr_qty", "fieldtype": "Float", "width": 110},
 		{"label": _("Status"), "fieldname": "status", "fieldtype": "Data", "width": 90},
 	]

@@ -272,12 +272,63 @@ def _get_or_new_pool_mr(company):
 
 
 # ---------------------------------------------------------------------------
+# Minimum order quantity (supplier MOQ)
+# ---------------------------------------------------------------------------
+
+def _min_order_map(items, warehouse=None):
+	"""Smallest quantity a supplier will sell for each item, read from the
+	standard ERPNext Item master (nothing custom to maintain):
+
+	  - Item > Minimum Order Qty                      (min_order_qty)
+	  - Item > Reorder table > Re-order Qty           (warehouse_reorder_qty)
+	    for the planning warehouse, Purchase-type rows only
+
+	The larger of the two is the effective minimum, so an item that has only
+	one of them filled in works too."""
+
+	if not items:
+		return {}
+
+	result = {}
+	for r in frappe.get_all("Item", filters={"name": ["in", list(items)]}, fields=["name", "min_order_qty"]):
+		result[r.name] = flt(r.min_order_qty)
+
+	reorder_rows = frappe.get_all(
+		"Item Reorder",
+		filters={"parent": ["in", list(items)], "parenttype": "Item"},
+		fields=["parent", "warehouse", "warehouse_reorder_qty", "material_request_type"],
+	)
+	for r in reorder_rows:
+		if r.material_request_type and r.material_request_type != "Purchase":
+			continue
+		if warehouse and r.warehouse and r.warehouse != warehouse:
+			continue
+		result[r.parent] = max(result.get(r.parent, 0.0), flt(r.warehouse_reorder_qty))
+	return result
+
+
+def apply_order_rules(net_shortfall, min_order_qty, enabled=True):
+	"""Quantity that actually goes on the Material Request for one item.
+
+	  - no shortfall                      -> 0 (never order just to meet a MOQ)
+	  - shortfall below the item's MOQ     -> the MOQ (supplier won't sell less)
+	  - shortfall at or above the MOQ      -> exactly the shortfall"""
+
+	net = flt(net_shortfall)
+	if net <= 0.01:
+		return 0.0
+	if enabled and flt(min_order_qty) > net:
+		return flt(min_order_qty)
+	return net
+
+
+# ---------------------------------------------------------------------------
 # Snapshot - the single source of truth used by BOTH the reconciler and the
 # Material Planning Dashboard report, so the dashboard can never drift from
 # what the live MR actually reflects.
 # ---------------------------------------------------------------------------
 
-def compute_planning_snapshot(planning_months=None, lead_time_months=None):
+def compute_planning_snapshot(planning_months=None, lead_time_months=None, warehouse=None):
 	settings = _settings()
 	planning_months = int(planning_months or settings.default_planning_months or 12)
 	lead_time_months = int(lead_time_months or settings.default_lead_time_months or 7)
@@ -310,6 +361,11 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None):
 		source_map[item_code] = "Shipping History (No Schedule)"
 
 	items_in_scope = list(demand_map.keys())
+
+	moq_on = settings.get("apply_min_order_qty")
+	moq_on = 1 if moq_on is None else cint(moq_on)
+	min_order_map = _min_order_map(items_in_scope, warehouse or settings.default_warehouse) if moq_on else {}
+
 	stock_map = _stock_map(items_in_scope)
 	open_po_map = _open_po_map(items_in_scope, company)
 	pool_name = _find_existing_pool_mr_name(company)
@@ -336,6 +392,9 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None):
 			status = "Surplus"
 		else:
 			status = "Covered"
+		shortfall = max(net, 0.0)
+		min_qty = min_order_map.get(item_code, 0.0)
+		order_qty = apply_order_rules(shortfall, min_qty, moq_on)
 		rows.append(
 			{
 				"item_code": item_code,
@@ -344,8 +403,11 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None):
 				"current_stock": stock,
 				"open_po_qty": open_po,
 				"other_open_mr_qty": other_mr,
-				"net_shortfall": max(net, 0.0),
+				"net_shortfall": shortfall,
 				"net_surplus": max(-net, 0.0),
+				"min_order_qty": min_qty,
+				"order_qty": order_qty,
+				"moq_extra": max(order_qty - shortfall, 0.0),
 				"status": status,
 				"auto_mr_qty": pool_items_map.get(item_code, 0.0),
 			}
@@ -361,16 +423,23 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None):
 		"required_by": str(req_date),
 		"company": company,
 		"pool_mr": pool_name,
+		"apply_min_order_qty": moq_on,
 	}
 
 
 def _line_description(info, planning_months, lead_time_months):
-	return (
+	text = (
 		f"Auto MR [{info['demand_source']}]: Demand {info['total_demand']:,.0f} "
 		f"- Stock {info['current_stock']:,.0f} - Open PO {info['open_po_qty']:,.0f} "
 		f"- Other Open MR {info['other_open_mr_qty']:,.0f} = Shortfall "
 		f"{info['net_shortfall']:,.0f} ({planning_months}M horizon, {lead_time_months}M lead time)"
 	)
+	if info.get("moq_extra", 0) > 0.01:
+		text += (
+			f". Raised to supplier Minimum Order Qty {info['min_order_qty']:,.0f} "
+			f"(+{info['moq_extra']:,.0f} above shortfall)"
+		)
+	return text
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +448,7 @@ def _line_description(info, planning_months, lead_time_months):
 
 def reconcile_material_requests(planning_months=None, lead_time_months=None, warehouse=None, triggered_by=None):
 	settings = _settings()
-	snapshot = compute_planning_snapshot(planning_months, lead_time_months)
-	company = snapshot["company"]
+	company = _company_or_none(settings)
 
 	if not company:
 		frappe.throw(
@@ -391,6 +459,7 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 
 	lead_time_months = int(lead_time_months or settings.default_lead_time_months or 7)
 	warehouse = _resolve_warehouse(settings, company, override=warehouse)
+	snapshot = compute_planning_snapshot(planning_months, lead_time_months, warehouse=warehouse)
 	req_date = snapshot["required_by"]
 
 	pool = _get_or_new_pool_mr(company)
@@ -411,7 +480,7 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 		pool.set("items", keep)
 
 	for item_code, info in shortfall_by_item.items():
-		qty = round(info["net_shortfall"], 2)
+		qty = round(info["order_qty"], 2)   # shortfall, or the supplier MOQ if that is larger
 		desc = _line_description(info, snapshot["planning_months"], lead_time_months)
 		row = existing_rows_by_item.get(item_code)
 		still_present = row is not None and row in (pool.items or [])

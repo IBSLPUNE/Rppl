@@ -18,10 +18,11 @@ be created by hand in the UI.
    format* below). The file is parsed into item / delivery date / quantity /
    demand type (Firm or Forecast) rows.
 2. **Auto-forecast top-up**: if the customer only gave you 3 months but parts
-   lead time is 7, pick a target month count and one of two methods -
-   *Average of Last 4 Weeks* or *Average Weekly Shipment - Last 3 Months*
-   (real Delivery Note history). Untick any item you don't want auto-forecast
-   for (e.g. one that's closing).
+   lead time is 7, pick a target month count and one of four methods -
+   *Average of Last 4 Weeks*, or *Average Weekly Shipment* over the last
+   *3 / 6 / 9 Months* (real Delivery Note history). Untick any item you don't
+   want auto-forecast for (e.g. one that's closing). See *Auto-forecast
+   methods* below for the exact maths.
 3. **Create as Draft, review, then Submit.** Submitting is what triggers
    everything downstream:
    - Firm rows -> **one Sales Order per delivery date** (multiple items,
@@ -98,6 +99,31 @@ Tune **Overdue Grace Period**, **Fall Back to Shipping History...**, and
 **Shipping History Window** in Schedule Planning Settings > Material Request
 Reconciliation.
 
+### Supplier Minimum Order Qty (MOQ)
+
+A supplier often will not sell below a fixed quantity. The live Auto Material
+Request therefore never asks for less than an item's MOQ:
+
+| Shortfall | Item MOQ | Quantity on the Material Request |
+| --- | --- | --- |
+| 1,000 | 2,500 | **2,500** (raised to the MOQ) |
+| 3,200 | 2,500 | **3,200** (shortfall is already above the MOQ) |
+| 0 (covered) | 2,500 | no line - an item is never ordered just to meet a MOQ |
+
+The MOQ is read from the standard ERPNext Item master, so nothing extra has to
+be maintained: **Item > Minimum Order Qty**, and/or the **Re-order Qty** on the
+Item's *Reorder* table for the planning warehouse (Purchase rows only). If both
+are filled in, the larger one is used. The Material Planning Dashboard shows
+*Min Order Qty*, *Order Qty (after MOQ)* and *Extra Due To MOQ*, and each
+Material Request line's description explains the raise. Once that Material
+Request is submitted, the extra quantity counts as supply, so it is used up
+before anything new is requested. Untick **Apply Supplier Minimum Order Qty** in
+Schedule Planning Settings to always request exactly the shortfall.
+
+The Reorder table's *Re-order Level* (the stock level that triggers a reorder
+in plain ERPNext) is deliberately not used: Schedule Planner orders from
+customer demand, not from a stock threshold.
+
 ### If a Material Request doesn't seem to be created
 
 This is almost always one of two things, both visible immediately since a
@@ -110,6 +136,120 @@ with the actual reason:
 2. **Nothing is actually short right now** - stock, open POs, or another
    open Material Request already cover the demand. Open the **Material
    Planning Dashboard** report to see the live numbers per item.
+
+## Item Mapping (customer part numbers -> your Items)
+
+A customer's file uses *their* part numbers, not your item codes. After you
+upload a file, every distinct part number is matched to an Item in this order
+(first hit wins; case, spaces and `- / . _` are ignored):
+
+1. **Saved Mapping** - a *Customer Item Mapping* record created the last time
+   someone corrected or confirmed that part number for this customer.
+2. **Item Supplier** - Item > Supplier Items > *Supplier Part No*.
+3. **Customer Item** - Item > Customer Items > *Ref Code* (this customer only).
+4. **Item Code** - the number is simply your own item code.
+5. **Numbers in the description.** Many files print the customer's own part
+   number next to our code (e.g. `25367965 RIVET NUT`). Any number of 6+
+   characters with a run of 5+ digits found there is tried against 2-4, first
+   exactly, then as a whole number *inside* a longer Supplier Part No / Ref
+   Code (so `25367965` finds `M8X18.5 RIVET NUT PART#25367965 DRAWING#25473611`;
+   it does not match inside a longer run of digits). One Item = matched, two
+   or more = left for the user with the candidates listed.
+6. Otherwise it is **Not mapped**. Name-similarity suggestions are shown as
+   clickable chips but are **never picked automatically**. A number that
+   matches *more than one* Item is also left for the user to decide.
+
+If everything matched, the forecast dialog opens straight away with a
+"Review / change mapping" link. If anything is unresolved, an **Item Mapping**
+table opens first and the schedule **cannot continue until every row is
+resolved**: pick an Item, tick **Create Item** (new Item with the part number
+as its code), or tick **Skip** (those rows are left out). A choice that
+differs from the automatic result is saved to *Customer Item Mapping* and
+reused on every later upload for that customer.
+
+On a **Draft** schedule the **Item Mapping** button re-opens the same table to
+fix a wrong item later; every row of that part number is re-pointed. The
+customer's original number is kept on each row (*Customer Part No*).
+
+Settings > *Item Matching* > **Auto-create Missing Items** (default off) brings
+back the old behaviour of silently creating an Item for unknown codes.
+
+## Known customer layouts (read without AI)
+
+The layout is recognised from the file's own text, so nothing needs to be set
+up per customer. AI extraction is used **only** for a layout the app has never
+seen (or if a known layout stops adding up - see below).
+
+| Layout | Recognised by | Demand types |
+|---|---|---|
+| Martinrea (Canada and Riverside) | "SUPPLIER RELEASE PLANNING SCHEDULE", release # and date from the header | Firm = Firm; Forecast, Fabrication, Raw Material = Forecast |
+| Techform / Magna portal print | "Planning Schedules", "Release Number:", "Issue Date:" | Firm = Firm; Forecast and Raw = Forecast |
+| Marwood / Plex | "ONLINE RELEASES TO SUPPLIERS" (no release number is printed, so the print time becomes `PLEX-yyyymmdd-hhmm`); one part under two POs is added up | per line Firm / Forecast |
+| Mytox | "MATERIAL REQUIREMENTS RELEASE": dates up to "Daily quantities end" are Firm, weekly and monthly buckets are Forecast; PAST-DUE is Firm dated today | see left |
+| Excel / CSV, weekly columns (e.g. Matcor) | a header row with a Part / PN column and 3+ date columns, Firm/Forecast band above | from the band row |
+| Excel / CSV, one row per date | Part, Date and Qty column headings in the first 10 rows | Demand Type column, else Forecast |
+
+Safety check: after reading, each PDF reader counts the data lines in the text
+again and gives up (falling back to AI) if even one line did not parse as a
+full row. A layout that changes slightly therefore cannot silently lose rows.
+
+The schedule date and release number come from the file (Martinrea "Date:",
+Mytox "RELEASE DATE", Matcor "Date :"), so the duplicate-release check works
+and revisions compare against the right previous release. Revision detection
+only compares dates from the new release's date onwards, so weeks that simply
+rolled off the front are not logged as "removed".
+
+Excel `.xls` (old format) needs the `xlrd` package: `bench pip install xlrd`.
+
+## Customers billed in a foreign currency
+
+Sales Orders created from a schedule use the customer's own currency (the
+currency of its receivable account). The exchange rate comes from ERPNext's
+Currency Exchange records - if there is none for e.g. USD -> INR, submit stops
+with a clear message asking you to add one. Line rates come from the
+customer's Selling Price List when it is priced in that currency, otherwise
+the Item's Standard Rate (company currency) is converted with the exchange rate.
+
+## Auto-forecast methods
+
+| Method | Weekly quantity used |
+| --- | --- |
+| Average of Last 4 Weeks | the file's last 4 calendar weeks added up, divided by 4. **A week with no quantity counts as 0**: 100, 0, 400, 0 gives (100 + 0 + 400 + 0) / 4 = **125**, not 250. |
+| Average Weekly Shipment - Last 3 Months | submitted Delivery Note qty of the item over the last 3 months / 13 weeks |
+| Average Weekly Shipment - Last 6 Months | same, over 6 months / 26 weeks |
+| Average Weekly Shipment - Last 9 Months | same, over 9 months / 39 weeks |
+
+Notes:
+
+- The "last 4 weeks" end where the customer's file ends (the last week column /
+  date printed in it, stored on the schedule as **File Horizon End**), not at
+  the last week that happens to have a quantity - otherwise the trailing zero
+  weeks would be skipped. For layouts where the readers cannot see that (a
+  plain long table) the last row's date is used.
+- The method can be chosen **per item**: the dialog's *Auto Forecast Method* is
+  the default for every item, and each row of the item table has its own
+  *Forecast Method* dropdown. The method used is saved on that item's schedule
+  rows (**Forecast Method** field), and the Extend Forecast dialog starts from it.
+- The item table in the upload / Extend Forecast dialog has an **Auto Forecast
+  Qty** column (and a total) showing how much will be added per item. It
+  updates live when you change the method, the total months, or untick an item,
+  and is computed by the same code that creates the rows.
+- **Items that end in monthly buckets** (e.g. the tail of a Mytox report: daily,
+  then weekly, then monthly columns): a 4-week window would fall between two
+  buckets, so Last 4 Weeks instead uses the weekly rate of the item's last 3
+  monthly buckets that have a quantity (each bucket's qty / weeks it covers,
+  averaged). Items whose last quantity is in a daily/weekly bucket (e.g. the
+  customer stops ordering after December) still use the normal 4-week window,
+  so they average 0.
+- Generated forecast rows start the week **after** the file's horizon end, and
+  never feed back into an average.
+- An item whose last 4 weeks are all zero gets no auto-forecast (the average
+  is 0); untick/ignore it as needed.
+- Shipping averages sum Delivery Notes for the item across all customers. Weeks
+  without shipments count as 0. If an item has no shipment history yet, the
+  Last 4 Weeks figure is used instead.
+- The schedule needs `bench migrate` once after updating (new fields
+  *File Horizon End* on the schedule and *Forecast Method* on its item rows).
 
 ## Install
 
@@ -290,6 +430,8 @@ Building it yourself in the UI is quick and can't corrupt anything:
      and how often.
    - **Forecast Revision Analysis** (report) - per-item revision pivot.
    - **Customer Schedule Format** (list) - per-customer parsing config.
+   - **Customer Item Mapping** (list) - saved customer part number -> Item
+     overrides, editable by hand.
    - **Schedule Planning Settings** - global defaults.
 3. **Save**. That's the whole dashboard - Frappe keeps it as a normal
    Workspace record from here on (editable, shareable, safe to tweak).
@@ -305,14 +447,17 @@ schedule_planner/
                                       Material Request / Material Request Item
   utils/
     file_parsers.py                  PDF/Excel/CSV -> row dicts (hybrid parsing)
-    forecast_engine.py               the 2 auto-forecast methods + extension logic
+    layout_parsers.py                known customer layouts read without AI (Martinrea, Techform, Marwood, Mytox, weekly-column Excel)
+    forecast_engine.py               the auto-forecast methods (4 weeks, 3/6/9-month shipping) + extension logic
     sales_documents.py               SO per-date + amendment, SF wholesale replace
     material_request.py              live Auto MR reconciler + planning snapshot
     revision.py                      diff vs previous schedule, revision stats
-    items.py                         auto-create Item if a schedule references a new one
+    items.py                         create an Item only when explicitly allowed
+    item_mapping.py                  customer part no -> Item resolver + saved overrides
   schedule_planner/doctype/
     customer_schedule/                main submittable document (+ client script)
-    customer_schedule_item/           child: item/date/qty/demand rows
+    customer_schedule_item/           child: item/date/qty/demand rows (+ Customer Part No)
+    customer_item_mapping/            per-customer part number -> Item overrides
     schedule_revision_log/            child: what changed vs the previous schedule
     customer_schedule_format/         per-customer parsing config
     schedule_column_mapping/          child: source column -> target field

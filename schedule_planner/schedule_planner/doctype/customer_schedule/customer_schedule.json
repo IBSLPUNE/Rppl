@@ -11,6 +11,7 @@
   "release_number",
   "column_break_1",
   "schedule_date",
+  "horizon_end",
   "schedule_format",
   "source_file",
   "status",
@@ -57,6 +58,13 @@
    "fieldtype": "Date",
    "in_list_view": 1,
    "label": "Schedule Date"
+  },
+  {
+   "fieldname": "horizon_end",
+   "fieldtype": "Date",
+   "label": "File Horizon End",
+   "read_only": 1,
+   "description": "Last week printed in the customer's file (zero weeks included). Generated forecast starts after this date."
   },
   {
    "fieldname": "schedule_format",
