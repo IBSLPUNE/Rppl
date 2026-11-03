@@ -2,6 +2,17 @@
 // For license information, please see license.txt
 
 frappe.ui.form.on("Customer Schedule", {
+	before_submit: function (frm) {
+		// Every submit goes through the Pre-submit Check first. The dialog's
+		// Submit button sets the flag and calls frm.save("Submit") again.
+		if (frm._sp_precheck_ok) {
+			frm._sp_precheck_ok = false;
+			return;
+		}
+		frappe.validated = false;
+		_presubmit(frm);
+	},
+
 	refresh: function (frm) {
 		if (frm.is_new()) {
 			frm.add_custom_button(__("Upload Schedule File"), function () {
@@ -16,6 +27,9 @@ frappe.ui.form.on("Customer Schedule", {
 			frm.add_custom_button(__("Item Mapping"), function () {
 				_show_draft_mapping(frm);
 			});
+			frm.add_custom_button(__("Pre-submit Check"), function () {
+				_presubmit(frm);
+			}).addClass("btn-warning");
 		}
 
 		if (frm.doc.docstatus === 1) {
@@ -67,6 +81,7 @@ function _upload_and_analyse(frm) {
 
 function _show_create_dialog(frm, file_url, analysis) {
 	const available_months = parseInt(analysis.available_months || 0);
+	const default_method = analysis.default_forecast_method || "LAST_4_WEEKS_AVG";
 	const default_target = available_months + 3;
 	const rows_json = JSON.stringify(analysis.parsed_rows || []);
 	const header_json = JSON.stringify(analysis.header || {});
@@ -88,7 +103,7 @@ function _show_create_dialog(frm, file_url, analysis) {
 						<b>${__("File Analysis")}</b><br>
 						${__("Release")}: <b>${frappe.utils.escape_html(analysis.header.release_number || "-")}</b>
 						&nbsp;|&nbsp; ${__("Data available")}: <b>${available_months}</b> ${__("month(s)")}
-						&nbsp;|&nbsp; ${analysis.from_date} &rarr; ${analysis.to_date}
+						&nbsp;|&nbsp; ${frappe.datetime.str_to_user(analysis.from_date)} &rarr; ${frappe.datetime.str_to_user(analysis.to_date)}
 						${mapping_banner}
 					</div>
 				`,
@@ -96,7 +111,7 @@ function _show_create_dialog(frm, file_url, analysis) {
 			{
 				fieldtype: "HTML",
 				fieldname: "item_table",
-				options: _item_table_html(analysis.item_details || [], "LAST_4_WEEKS_AVG"),
+				options: _item_table_html(analysis.item_details || [], default_method),
 			},
 			{ fieldtype: "Section Break" },
 			{
@@ -120,10 +135,10 @@ function _show_create_dialog(frm, file_url, analysis) {
 					{ label: "Average Weekly Shipment - Last 6 Months", value: "LAST_6_MONTHS_SHIPPING_AVG" },
 					{ label: "Average Weekly Shipment - Last 9 Months", value: "LAST_9_MONTHS_SHIPPING_AVG" },
 				],
-				default: "LAST_4_WEEKS_AVG",
+				default: default_method,
 				reqd: 1,
 			},
-			{ fieldtype: "HTML", fieldname: "method_help", options: _method_help_html("LAST_4_WEEKS_AVG") },
+			{ fieldtype: "HTML", fieldname: "method_help", options: _method_help_html(default_method) },
 			{ fieldtype: "HTML", fieldname: "forecast_preview", options: `<div class="sp-forecast-preview"></div>` },
 		],
 		primary_action_label: __("Create Customer Schedule (Draft)"),
@@ -159,6 +174,7 @@ function _show_create_dialog(frm, file_url, analysis) {
 					header_json: header_json,
 					rows_json: rows_json,
 					schedule_format: analysis.schedule_format,
+					file_check_json: JSON.stringify(analysis.file_check || {}),
 				},
 				freeze: true,
 				freeze_message: __("Creating Customer Schedule..."),
@@ -217,7 +233,7 @@ function _show_create_dialog(frm, file_url, analysis) {
 	_wire_item_table(dialog, function () {
 		_refresh_preview_from_rows(dialog, rows_json, dialog.get_value("forecast_method"), _get_selected_items(dialog));
 	});
-	_refresh_preview_from_rows(dialog, rows_json, "LAST_4_WEEKS_AVG", _get_selected_items(dialog));
+	_refresh_preview_from_rows(dialog, rows_json, default_method, _get_selected_items(dialog));
 }
 
 // ============================================================================
@@ -486,6 +502,7 @@ function _show_extend_dialog(frm) {
 		callback: function (r) {
 			if (!r.message) return;
 			const info = r.message;
+			const default_method = info.default_forecast_method || "LAST_4_WEEKS_AVG";
 			if (!info.available_months) {
 				frappe.msgprint(__("No schedule rows found on this document yet."));
 				return;
@@ -501,11 +518,11 @@ function _show_extend_dialog(frm) {
 						options: `
 							<div style="padding:10px 12px;background:var(--bg-light-gray,#f8f9fa);border-radius:6px;margin-bottom:12px;font-size:12px">
 								${__("Current coverage")}: <b>${info.available_months}</b> ${__("month(s)")}
-								&nbsp;|&nbsp; ${info.from_date} &rarr; ${info.to_date}
+								&nbsp;|&nbsp; ${frappe.datetime.str_to_user(info.from_date)} &rarr; ${frappe.datetime.str_to_user(info.to_date)}
 							</div>
 						`,
 					},
-					{ fieldtype: "HTML", fieldname: "item_table", options: _item_table_html(info.item_details || [], "LAST_4_WEEKS_AVG") },
+					{ fieldtype: "HTML", fieldname: "item_table", options: _item_table_html(info.item_details || [], default_method) },
 					{ fieldtype: "Section Break" },
 					{
 						fieldtype: "Int",
@@ -525,10 +542,10 @@ function _show_extend_dialog(frm) {
 							{ label: "Average Weekly Shipment - Last 6 Months", value: "LAST_6_MONTHS_SHIPPING_AVG" },
 							{ label: "Average Weekly Shipment - Last 9 Months", value: "LAST_9_MONTHS_SHIPPING_AVG" },
 						],
-						default: "LAST_4_WEEKS_AVG",
+						default: default_method,
 						reqd: 1,
 					},
-					{ fieldtype: "HTML", fieldname: "method_help", options: _method_help_html("LAST_4_WEEKS_AVG") },
+					{ fieldtype: "HTML", fieldname: "method_help", options: _method_help_html(default_method) },
 					{ fieldtype: "HTML", fieldname: "forecast_preview", options: `<div class="sp-forecast-preview"></div>` },
 				],
 				primary_action_label: __("Generate Forecast"),
@@ -592,7 +609,7 @@ function _show_extend_dialog(frm) {
 					_get_selected_items(dialog)
 				);
 			});
-			_refresh_preview_from_schedule(dialog, frm.doc.name, "LAST_4_WEEKS_AVG", _get_selected_items(dialog));
+			_refresh_preview_from_schedule(dialog, frm.doc.name, default_method, _get_selected_items(dialog));
 		},
 	});
 }
@@ -754,7 +771,7 @@ function _item_table_html(item_details, default_method) {
 				<td style="text-align:center;font-size:12px">
 					<span style="background:var(--bg-blue,#eaf4ff);color:var(--text-accent,#2490ef);padding:2px 8px;border-radius:4px;font-weight:500">${item.months} mo</span>
 				</td>
-				<td style="font-size:12px;color:var(--text-muted)">${item.from_date} &rarr; ${item.to_date}</td>
+				<td style="font-size:12px;color:var(--text-muted)">${frappe.datetime.str_to_user(item.from_date)} &rarr; ${frappe.datetime.str_to_user(item.to_date)}</td>
 				<td style="text-align:right;font-size:12px">${Number(item.total_qty || 0).toLocaleString()}</td>
 				<td style="font-size:12px">${_method_select_html(item.item_code, item.forecast_method || default_method)}</td>
 				<td class="sp-auto-qty" data-item="${frappe.utils.escape_html(item.item_code)}" style="text-align:right;font-size:12px;font-weight:500;color:var(--text-muted)">&hellip;</td>
@@ -768,6 +785,7 @@ function _item_table_html(item_details, default_method) {
 			<a href="#" class="sp-deselect-all">${__("Deselect all")}</a>
 			<span style="color:var(--text-muted)"> &mdash; ${__("uncheck an item to exclude it from auto-forecast (e.g. a closing part); pick a different Forecast Method for any item")}</span>
 		</div>
+		<div class="sp-limit-banner" style="display:none"></div>
 		<div style="max-height:260px;overflow-y:auto;border:1px solid var(--border-color,#d1d8dd);border-radius:6px">
 			<table class="table table-condensed" style="margin:0;font-size:12px">
 				<thead style="position:sticky;top:0;background:var(--fg-color,#fff);z-index:1">
@@ -794,17 +812,43 @@ function _item_table_html(item_details, default_method) {
 // unticked (or get no forecast) show a dash.
 function _fill_auto_qty(dialog, preview) {
 	const by_item = {};
+	const flagged = [];
 	let total = 0;
+	let multiplier = 2;
 	(preview || []).forEach(function (p) {
-		by_item[p.item_code] = Number(p.auto_qty || 0);
+		by_item[p.item_code] = p;
 		total += Number(p.auto_qty || 0);
+		if (p.limit_multiplier) multiplier = p.limit_multiplier;
+		if (p.forecast_flag) flagged.push(p);
 	});
 	dialog.$wrapper.find(".sp-auto-qty").each(function () {
-		const qty = by_item[String($(this).attr("data-item"))];
-		$(this).css("color", qty ? "var(--text-color)" : "var(--text-muted)");
-		$(this).text(qty ? qty.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-");
+		const p = by_item[String($(this).attr("data-item"))];
+		const qty = p ? Number(p.auto_qty || 0) : 0;
+		let html = qty ? qty.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-";
+		let color = qty ? "var(--text-color)" : "var(--text-muted)";
+		if (p && p.forecast_flag) {
+			const ratio = p.forecast_ratio === null || p.forecast_ratio === undefined ? __("no history") : Number(p.forecast_ratio).toFixed(1) + "x";
+			html = "&#9888; " + html + ` <span style="font-weight:400">(${ratio})</span>`;
+			color = "var(--red-600,#c53030)";
+		}
+		$(this).css("color", color).html(html);
 	});
 	dialog.$wrapper.find(".sp-total-auto-qty").text(total.toLocaleString(undefined, { maximumFractionDigits: 2 }));
+
+	const $banner = dialog.$wrapper.find(".sp-limit-banner");
+	if (flagged.length) {
+		$banner
+			.html(
+				`<div class="alert alert-danger" style="font-size:12px;padding:8px 12px;margin-bottom:8px">
+					<b>&#9888; ${__("{0} item(s) have a forecast above {1}x their history:", [flagged.length, multiplier])}</b>
+					${flagged.map((p) => frappe.utils.escape_html(p.item_code)).join(", ")}.<br>
+					${__("You can still create the Draft, but Submit will need approval from a user with the approver role (Schedule Planning Settings). Consider a lower forecast method for these items.")}
+				</div>`
+			)
+			.show();
+	} else {
+		$banner.hide().empty();
+	}
 }
 
 function _mark_auto_qty_loading(dialog) {
@@ -948,4 +992,173 @@ function _refresh_preview_from_schedule(dialog, schedule_name, method, selected_
 			_fill_auto_qty(dialog, r.message);
 		},
 	});
+}
+
+// ============================================================================
+// PRE-SUBMIT CHECK - shown instead of a blind Submit. The server enforces the
+// same rules (utils/safety.py), this dialog is how the user clears them.
+// ============================================================================
+
+const SP_NUM = (v, d) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 2 : d });
+const SP_ESC = (v) => frappe.utils.escape_html(v === null || v === undefined ? "" : String(v));
+
+function _presubmit(frm) {
+	frappe.call({
+		method: "schedule_planner.api.get_presubmit_report",
+		args: { schedule_name: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Running pre-submit check..."),
+		callback: function (r) {
+			if (!r.message) return;
+			_show_presubmit_dialog(frm, r.message);
+		},
+	});
+}
+
+function _show_presubmit_dialog(frm, report) {
+	const state = { report: report, reconcile_ok: false };
+
+	const dialog = new frappe.ui.Dialog({
+		title: __("Pre-submit Check - {0}", [frm.doc.name]),
+		size: "extra-large",
+		fields: [{ fieldtype: "HTML", fieldname: "body" }],
+		primary_action_label: __("Submit"),
+		primary_action: function () {
+			dialog.hide();
+			frm._sp_precheck_ok = true;
+			frm.save("Submit");
+		},
+	});
+
+	function can_submit() {
+		const rep = state.report;
+		if (rep.ack.required && !rep.ack.done) return false;
+		if (rep.forecast.needs_approval && !rep.forecast.approved) return false;
+		if (rep.file.reconciles === false && !state.reconcile_ok) return false;
+		return true;
+	}
+
+	function badge(ok, text_ok, text_bad) {
+		return ok
+			? `<span class="indicator-pill green">${text_ok}</span>`
+			: `<span class="indicator-pill red">${text_bad}</span>`;
+	}
+
+	function render() {
+		const rep = state.report;
+		const f = rep.file;
+		const diff = f.total_qty - (f.system_qty + f.skipped_qty);
+		let html = "";
+
+		// 1. File vs system
+		html += `<h6 style="margin-top:0">${__("1. File total vs schedule lines")}</h6>
+		<table class="table table-bordered table-condensed" style="font-size:12px;margin-bottom:6px">
+			<tr><td>${__("Total qty printed in the customer's file")}</td><td style="text-align:right"><b>${SP_NUM(f.total_qty)}</b></td></tr>
+			<tr><td>${__("Qty in this schedule (customer lines only, forecast excluded)")}</td><td style="text-align:right"><b>${SP_NUM(f.system_qty)}</b></td></tr>
+			<tr><td>${__("Qty of skipped part numbers")}</td><td style="text-align:right"><b>${SP_NUM(f.skipped_qty)}</b></td></tr>
+			<tr><td>${__("Difference (file - schedule - skipped)")}</td><td style="text-align:right"><b style="color:${Math.abs(diff) > 0.5 ? "var(--red-500,#e24c4c)" : "var(--green-600,#38a169)"}">${SP_NUM(diff)}</b></td></tr>
+		</table>`;
+		if (f.reconciles === false) {
+			html += `<div class="alert alert-danger" style="font-size:12px;padding:8px 12px">
+				${__("The schedule does not add up to the file.")}
+				${f.edited_since_upload ? __("Customer lines were edited after upload (loaded {0}, now {1}).", [SP_NUM(f.included_qty), SP_NUM(f.system_qty)]) : ""}
+				<br><label style="margin:6px 0 0"><input type="checkbox" class="sp-reconcile-cb" ${state.reconcile_ok ? "checked" : ""}> ${__("I know why the totals differ and it is correct")}</label></div>`;
+		} else if (f.reconciles === true) {
+			html += `<div style="margin-bottom:8px">${badge(true, __("Schedule matches the file"), "")}</div>`;
+		}
+
+		// 2. Parsed
+		html += `<h6>${__("2. What was read from the file")}</h6>
+		<div style="font-size:12px;margin-bottom:8px">
+			${__("Months in file")}: <b>${f.months_parsed || f.months_in_lines}</b>
+			${f.from_date ? ` (${SP_ESC(frappe.datetime.str_to_user(f.from_date))} &rarr; ${SP_ESC(frappe.datetime.str_to_user(f.to_date))})` : ""}
+			&nbsp;|&nbsp; ${__("Lines loaded")}: <b>${f.lines_in_schedule}</b>${f.lines_parsed ? ` ${__("of")} ${f.lines_parsed}` : ""}
+			&nbsp;|&nbsp; ${__("Items")}: <b>${f.items}</b>
+			&nbsp;|&nbsp; ${__("Skipped part numbers")}: <b>${rep.skipped.length}</b>
+		</div>`;
+
+		// 3. Skipped
+		html += `<h6>${__("3. Skipped / unmapped part numbers")}</h6>`;
+		if (!rep.skipped.length) {
+			html += `<div style="margin-bottom:8px">${badge(true, __("Nothing was skipped"), "")}</div>`;
+		} else {
+			html += `<table class="table table-bordered table-condensed" style="font-size:12px;margin-bottom:6px">
+				<thead><tr><th>${__("Customer Part No")}</th><th>${__("Description")}</th><th style="text-align:right">${__("Lines")}</th><th style="text-align:right">${__("Qty not planned")}</th></tr></thead><tbody>
+				${rep.skipped.map((s) => `<tr><td>${SP_ESC(s.file_part_no)}</td><td>${SP_ESC(s.description)}</td><td style="text-align:right">${SP_NUM(s.lines, 0)}</td><td style="text-align:right">${SP_NUM(s.qty)}</td></tr>`).join("")}
+				</tbody></table>`;
+			if (rep.ack.done) {
+				html += `<div style="margin-bottom:8px">${badge(true, __("Acknowledged by {0}", [SP_ESC(rep.ack.by)]), "")}</div>`;
+			} else {
+				html += `<div class="alert alert-warning" style="font-size:12px;padding:8px 12px"><label style="margin:0"><input type="checkbox" class="sp-ack-cb"> <b>${__("I have checked these skipped parts. They will NOT be planned or ordered.")}</b></label></div>`;
+			}
+		}
+
+		// 4. Forecast
+		const fc = rep.forecast;
+		html += `<h6>${__("4. Auto forecast vs history (limit {0}x)", [fc.multiplier])}</h6>
+		<div style="font-size:12px;margin-bottom:6px">${__("Forecast lines")}: <b>${fc.lines}</b> &nbsp;|&nbsp; ${__("Forecast qty")}: <b>${SP_NUM(fc.qty)}</b> &nbsp;|&nbsp; ${__("Months")}: <b>${fc.months}</b></div>`;
+		if (!fc.needs_approval) {
+			html += `<div style="margin-bottom:8px">${badge(true, __("Forecast is within the limit"), "")}</div>`;
+		} else {
+			html += `<table class="table table-bordered table-condensed" style="font-size:12px;margin-bottom:6px">
+				<thead><tr><th>${__("Item")}</th><th style="text-align:right">${__("Forecast / week")}</th><th style="text-align:right">${__("History / week")}</th><th style="text-align:right">${__("x History")}</th><th style="text-align:right">${__("Forecast total")}</th></tr></thead><tbody>
+				${fc.flags.map((x) => `<tr style="color:var(--red-600,#c53030)"><td>${SP_ESC(x.item_code)}</td><td style="text-align:right">${SP_NUM(x.forecast_weekly)}</td><td style="text-align:right">${SP_NUM(x.history_weekly)}</td><td style="text-align:right"><b>${x.ratio === null ? __("no history") : SP_NUM(x.ratio, 1) + "x"}</b></td><td style="text-align:right">${SP_NUM(x.forecast_total)}</td></tr>`).join("")}
+				</tbody></table>`;
+			if (fc.approved) {
+				html += `<div style="margin-bottom:8px">${badge(true, __("Approved by {0}: {1}", [SP_ESC(fc.approved_by), SP_ESC(fc.approved_note)]), "")}</div>`;
+			} else if (fc.can_approve) {
+				html += `<div class="alert alert-danger" style="font-size:12px;padding:8px 12px">
+					<b>${__("This forecast is above {0}x history and needs your approval.", [fc.multiplier])}</b>
+					<textarea class="form-control sp-approve-note" rows="2" placeholder="${__("Reason (required) - e.g. customer confirmed new programme")}" style="margin:6px 0"></textarea>
+					<button class="btn btn-xs btn-danger sp-approve-btn">${__("Approve Forecast Above Limit")}</button></div>`;
+			} else {
+				html += `<div class="alert alert-danger" style="font-size:12px;padding:8px 12px">${__("This forecast is above {0}x history. A user with the role {1} must open this schedule and approve it before it can be submitted.", [fc.multiplier, "<b>" + SP_ESC(fc.approver_role) + "</b>"])}</div>`;
+			}
+		}
+
+		dialog.fields_dict.body.$wrapper.html(html);
+		dialog.get_primary_btn().prop("disabled", !can_submit());
+	}
+
+	function reload() {
+		frappe.call({
+			method: "schedule_planner.api.get_presubmit_report",
+			args: { schedule_name: frm.doc.name },
+			callback: function (r) {
+				if (r.message) {
+					state.report = r.message;
+					render();
+				}
+			},
+		});
+	}
+
+	const $w = dialog.fields_dict.body.$wrapper;
+	$w.on("change", ".sp-reconcile-cb", function () {
+		state.reconcile_ok = $(this).prop("checked");
+		render();
+	});
+	$w.on("change", ".sp-ack-cb", function () {
+		if (!$(this).prop("checked")) return;
+		frappe.call({
+			method: "schedule_planner.api.acknowledge_presubmit",
+			args: { schedule_name: frm.doc.name },
+			callback: reload,
+		});
+	});
+	$w.on("click", ".sp-approve-btn", function () {
+		const note = ($w.find(".sp-approve-note").val() || "").trim();
+		if (!note) {
+			frappe.msgprint(__("Write a short reason for approving this forecast."));
+			return;
+		}
+		frappe.call({
+			method: "schedule_planner.api.approve_forecast_limit",
+			args: { schedule_name: frm.doc.name, note: note },
+			callback: reload,
+		});
+	});
+
+	render();
+	dialog.show();
 }

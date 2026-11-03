@@ -26,7 +26,12 @@
   "llm_model",
   "column_break_2",
   "llm_api_key",
-  "llm_endpoint"
+  "llm_endpoint",
+  "safety_section",
+  "forecast_limit_multiplier",
+  "max_cover_months",
+  "safety_column_break",
+  "approver_role"
  ],
  "fields": [
   {
@@ -176,6 +181,37 @@
    "fieldtype": "Check",
    "label": "Auto-create Missing Items",
    "description": "Off (recommended): when a customer part number matches no Item, the user must map it, tick Create Item, or skip it. On: unmatched lines silently create a new Item (old behaviour)."
+  },
+  {
+   "fieldname": "safety_section",
+   "fieldtype": "Section Break",
+   "label": "Safety Limits"
+  },
+  {
+   "fieldname": "forecast_limit_multiplier",
+   "fieldtype": "Float",
+   "label": "Forecast Limit (x history)",
+   "default": "2",
+   "description": "An auto-forecast weekly qty above this multiple of the item's history (file average or last 6 months' shipments, whichever is higher) needs approval before the schedule can be submitted. 0 = no limit."
+  },
+  {
+   "fieldname": "max_cover_months",
+   "fieldtype": "Float",
+   "label": "Maximum Months of Cover",
+   "default": "12",
+   "description": "A Material Request line that leaves more than this many months of stock (available + order) against the monthly demand needs approval. 0 = no limit."
+  },
+  {
+   "fieldname": "safety_column_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "approver_role",
+   "fieldtype": "Link",
+   "label": "Approver Role",
+   "options": "Role",
+   "default": "System Manager",
+   "description": "Users with this role can approve a forecast above the limit and submit a Material Request with excess cover."
   }
  ],
  "index_web_pages_for_search": 1,

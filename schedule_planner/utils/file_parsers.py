@@ -170,6 +170,7 @@ def _parse_tabular(file_path, fmt):
 
 	header_row = (fmt.header_row or 1) - 1
 	if fmt.file_type == "Excel":
+		_require_xlrd(file_path)
 		read_kwargs = {"header": header_row}
 		if fmt.sheet_name:
 			read_kwargs["sheet_name"] = fmt.sheet_name
@@ -300,10 +301,25 @@ def _default_header(customer, file_path):
 # Forecast ..." row above it).
 # ---------------------------------------------------------------------------
 
+def _require_xlrd(file_path):
+	"""pandas reads old .xls workbooks only through xlrd. Say so plainly
+	instead of letting the failure look like an unreadable layout."""
+	if not str(file_path).lower().endswith(".xls"):
+		return
+	try:
+		import xlrd  # noqa: F401
+	except ImportError:
+		frappe.throw(
+			"Old Excel files (.xls) need the xlrd package on the server. Run "
+			"<code>bench pip install xlrd</code> and restart, or save the file as .xlsx and upload that."
+		)
+
+
 def _read_raw_no_header(file_path, fmt):
 	import pandas as pd
 
 	if fmt.file_type == "Excel":
+		_require_xlrd(file_path)
 		read_kwargs = {"header": None}
 		if fmt.sheet_name:
 			read_kwargs["sheet_name"] = fmt.sheet_name

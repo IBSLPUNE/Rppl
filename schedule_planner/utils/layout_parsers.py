@@ -19,7 +19,7 @@ authorisations are treated as Forecast (client decision). Mytox prints no
 label at all, so its daily quantities are Firm and weekly/monthly are Forecast.
 
 Known layouts: martinrea_cms (Martinrea Canada and Riverside), techform_portal,
-marwood_plex, mytox_mrr. Excel/CSV layouts are auto-detected in file_parsers.py.
+techform_acs (Techform PO064R spool print), marwood_plex, mytox_mrr. Excel/CSV layouts are auto-detected in file_parsers.py.
 """
 
 import re
@@ -85,9 +85,14 @@ def detect_martinrea_cms(text):
 
 
 def parse_martinrea_cms(text):
-	head = re.search(rf"Release#:\s*(\S+)\s+Date:\s*({_DATE})", text)
-	if not head:
+	# Martinrea prints each part under ITS OWN latest release, so one file can
+	# carry many releases (a Feb-2024 print held 24 of them, back to 2021). The
+	# schedule is identified by the newest release in the file, never the
+	# first page's - otherwise the revision history would be dated 2021.
+	heads = list(re.finditer(rf"Release#:\s*(\S+)\s+Date:\s*({_DATE})", text))
+	if not heads:
 		return None
+	head = max(heads, key=lambda m: _d(m.group(2)))
 	vendor = re.search(r"Vendor:\s*(\S+)", text)
 
 	rows, current, name, loose = [], None, {}, 0
@@ -189,6 +194,97 @@ def parse_techform_portal(text):
 		"horizon_end": str(horizon) if horizon else None,
 	}
 	return header, rows
+
+
+# ---------------------------------------------------------------------------
+# Techform "Vendor Planning Schedule" (report PO064R, ACS spool print)
+# ---------------------------------------------------------------------------
+# Per part: a "Part Number" header (code on the next line, description on the
+# one after), then bands of up to 10 weeks printed as four lines - Date /
+# Net Req. / Period / Auth Type. Bands can run over a page break; the page
+# header repeats but the part carries on. Auth Type: Firm, Raw (raw-material
+# authorisation) and Forecast; Raw counts as Forecast (client decision).
+
+_ACS_DATES = re.compile(rf"^\s*Date\s+((?:{_DATE}\s*)+)$")
+_ACS_NUMS = re.compile(r"^\s*Net Req\.\s+((?:[\d,]*\.?\d+-?\s*)+)$")
+_ACS_AUTH = re.compile(r"^\s*Auth Type\s+((?:\S+\s*)+)$")
+
+
+def detect_techform_acs(text):
+	return (
+		"Vendor Planning Schedule" in text
+		and "Part Number" in text
+		and "Net Req." in text
+		and "Auth Type" in text
+	)
+
+
+def parse_techform_acs(text):
+	head = re.search(rf"Release #:\s*(\S+)\s+Issue Date:\s*({_DATE})", text)
+	if not head:
+		return None
+	vendor = re.search(r"Vendor:\s*([A-Z]+\d+)", text)
+
+	lines = text.splitlines()
+	rows, name, horizon = [], {}, None
+	current, cells_expected, cells_read = None, 0, 0
+	parts_seen = 0
+	i = 0
+	while i < len(lines):
+		line = lines[i]
+		if re.match(r"\s*Part Number\s+Vendor Part Number", line):
+			# code on the next line, description on the one after
+			code_line = lines[i + 1] if i + 1 < len(lines) else ""
+			desc_line = lines[i + 2] if i + 2 < len(lines) else ""
+			code = code_line.split()[0] if code_line.split() else None
+			if not code:
+				return None
+			current = code
+			parts_seen += 1
+			description = re.split(r"\s{2,}|Fab\. Cum", desc_line.strip())[0].strip()
+			name.setdefault(code, description or code)
+			i += 3
+			continue
+
+		m = _ACS_DATES.match(line)
+		if m:
+			dates = re.findall(_DATE, m.group(1))
+			# the next three printed lines must be Net Req. / Period / Auth Type
+			block = [l for l in lines[i + 1 : i + 6] if l.strip()][:3]
+			if current is None or len(block) < 3:
+				return None
+			nums = _ACS_NUMS.match(block[0])
+			auth = _ACS_AUTH.match(block[2])
+			if not nums or not auth or not block[1].strip().startswith("Period"):
+				return None
+			qtys = nums.group(1).split()
+			labels = auth.group(1).split()
+			if not (len(dates) == len(qtys) == len(labels)):
+				return None
+			cells_expected += len(dates)
+			for token, qty_text, label in zip(dates, qtys, labels):
+				when = _d(token)
+				horizon = when if horizon is None or when > horizon else horizon
+				cells_read += 1
+				qty = _num(qty_text)
+				if qty > 0:
+					rows.append(_row(current, name.get(current), when, qty, label))
+		i += 1
+
+	# independent re-count of every printed week cell
+	printed = sum(len(re.findall(_DATE, l)) for l in lines if _ACS_DATES.match(l))
+	if not parts_seen or not rows or printed != cells_read or cells_expected != cells_read:
+		return None
+	for r in rows:
+		r["item_name"] = name.get(r["item_code"]) or r["item_code"]
+
+	header = {
+		"release_number": head.group(1),
+		"supplier_vendor": vendor.group(1) if vendor else "",
+		"schedule_date": str(_d(head.group(2))),
+		"horizon_end": str(horizon) if horizon else None,
+	}
+	return header, _merge(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +450,7 @@ def parse_mytox_mrr(text, today=None):
 KNOWN_PDF_LAYOUTS = [
 	("martinrea_cms", "Martinrea (CMS release planning schedule)", detect_martinrea_cms, parse_martinrea_cms),
 	("techform_portal", "Techform / Magna planning schedule", detect_techform_portal, parse_techform_portal),
+	("techform_acs", "Techform vendor planning schedule (PO064R)", detect_techform_acs, parse_techform_acs),
 	("marwood_plex", "Marwood / Plex online release", detect_marwood_plex, parse_marwood_plex),
 	("mytox_mrr", "Mytox material requirements release", detect_mytox_mrr, parse_mytox_mrr),
 ]

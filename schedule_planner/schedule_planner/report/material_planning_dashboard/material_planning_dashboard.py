@@ -51,12 +51,19 @@ def execute(filters=None):
 				"current_stock": r["current_stock"],
 				"open_po_qty": r["open_po_qty"],
 				"other_open_mr_qty": r["other_open_mr_qty"],
+				"available_qty": r["available_qty"],
+				"reorder_level": r["reorder_level"] or None,
+				"reorder_check": r["reorder_check"],
 				"net_shortfall": r["net_shortfall"],
 				"net_surplus": r["net_surplus"],
 				"min_order_qty": r["min_order_qty"],
 				"order_qty": r["order_qty"],
 				"moq_extra": r["moq_extra"],
+				"monthly_demand": r["monthly_demand"],
+				"cover_after": r["cover_after"],
+				"cover_flag": r["cover_flag"],
 				"auto_mr_qty": r["auto_mr_qty"],
+				"mr_decision": r["mr_decision"],
 				"status": r["status"],
 			}
 		)
@@ -69,12 +76,18 @@ def execute(filters=None):
 		{"label": _("Current Stock"), "fieldname": "current_stock", "fieldtype": "Float", "width": 110},
 		{"label": _("Open PO Qty"), "fieldname": "open_po_qty", "fieldtype": "Float", "width": 100},
 		{"label": _("Other Open MR Qty"), "fieldname": "other_open_mr_qty", "fieldtype": "Float", "width": 130},
+		{"label": _("Available (Stock+PO+MR)"), "fieldname": "available_qty", "fieldtype": "Float", "width": 150},
+		{"label": _("Re-order Level"), "fieldname": "reorder_level", "fieldtype": "Float", "width": 110},
+		{"label": _("Reorder Check"), "fieldname": "reorder_check", "fieldtype": "Data", "width": 150},
 		{"label": _("Net Shortfall"), "fieldname": "net_shortfall", "fieldtype": "Float", "width": 110},
 		{"label": _("Net Surplus"), "fieldname": "net_surplus", "fieldtype": "Float", "width": 100},
 		{"label": _("Min Order Qty"), "fieldname": "min_order_qty", "fieldtype": "Float", "width": 110},
 		{"label": _("Order Qty (after MOQ)"), "fieldname": "order_qty", "fieldtype": "Float", "width": 140},
 		{"label": _("Extra Due To MOQ"), "fieldname": "moq_extra", "fieldtype": "Float", "width": 120},
+		{"label": _("Monthly Demand"), "fieldname": "monthly_demand", "fieldtype": "Float", "width": 110},
+		{"label": _("Cover After Order (Months)"), "fieldname": "cover_after", "fieldtype": "Float", "precision": 1, "width": 150},
 		{"label": _("On Live Auto MR"), "fieldname": "auto_mr_qty", "fieldtype": "Float", "width": 110},
+		{"label": _("MR Decision"), "fieldname": "mr_decision", "fieldtype": "Data", "width": 300},
 		{"label": _("Status"), "fieldname": "status", "fieldtype": "Data", "width": 90},
 	]
 
@@ -87,7 +100,12 @@ def execute(filters=None):
 		f"Demand window: {snapshot['start_date']} to {snapshot['end_date']} "
 		f"({snapshot['planning_months']}M horizon, {snapshot['grace_days']}d overdue grace). "
 		f"Required-by date used for new lines: {snapshot['required_by']} "
-		f"({snapshot['lead_time_months']}M lead time). {pool_note}"
+		f"({snapshot['lead_time_months']}M lead time). "
+		f"A Material Request line is raised only when there is a shortfall and, for an item with a Re-order "
+		f"Level, Available (Stock + Open PO + Other MR) is below that level; qty = greatest of net shortfall, "
+		f"Min Order Qty and Re-order Qty. "
+		f"Cover After Order = (Available + Order Qty) / Monthly Demand; above {snapshot['cover_limit']:g} months "
+		f"it is shown in red and the Material Request needs approval. {pool_note}"
 	)
 
 	return columns, data, message

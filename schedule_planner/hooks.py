@@ -12,13 +12,13 @@ app_license = "MIT"
 # Fixtures
 # --------
 # Custom fields added on core doctypes (Sales Order, Sales Forecast, Material
-# Request/Material Request Item) so that installing this app is enough -
+# Request/Material Request Item, Customer) so that installing this app is enough -
 # nothing has to be created by hand in the UI.
 fixtures = [
 	{
 		"dt": "Custom Field",
 		"filters": [
-			["dt", "in", ["Sales Order", "Sales Forecast", "Material Request", "Material Request Item"]],
+			["dt", "in", ["Sales Order", "Sales Forecast", "Material Request", "Material Request Item", "Customer"]],
 			["fieldname", "like", "custom_sp_%"],
 		],
 	}
@@ -39,6 +39,9 @@ doc_events = {
 		"on_submit": "schedule_planner.schedule_planner.doctype.customer_schedule.customer_schedule.on_submit",
 		"on_cancel": "schedule_planner.schedule_planner.doctype.customer_schedule.customer_schedule.on_cancel",
 	},
+	"Material Request": {
+		"before_submit": "schedule_planner.utils.safety.mr_before_submit",
+	},
 	"Delivery Note": {
 		"on_submit": "schedule_planner.utils.material_request.on_delivery_note_change",
 		"on_cancel": "schedule_planner.utils.material_request.on_delivery_note_change",
@@ -56,6 +59,9 @@ scheduler_events = {
 		"schedule_planner.tasks.scheduled_material_request_dispatch",
 	],
 }
+
+# Client script on the stock Material Request form (months-of-cover warning)
+doctype_js = {"Material Request": "public/js/material_request.js"}
 
 # Website / desk assets (none required beyond what doctypes ship with)
 # app_include_js = []

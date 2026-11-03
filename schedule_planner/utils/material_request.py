@@ -57,6 +57,8 @@ from datetime import timedelta
 import frappe
 from frappe.utils import add_months, cint, flt, getdate, today
 
+from schedule_planner.utils import safety
+
 
 def _settings():
 	return frappe.get_cached_doc("Schedule Planning Settings")
@@ -122,6 +124,98 @@ def _schedule_demand_map(start_date, end_date):
 		as_dict=True,
 	)
 	return {r.item_code: flt(r.total_required_qty) for r in rows}
+
+
+def get_demand_breakup(item_code, planning_months=None):
+	"""Where an item's Total Demand on the Material Planning Dashboard comes
+	from: the same rows _schedule_demand_map adds up (latest submitted schedule
+	per customer + item + delivery date, inside the demand window), listed one
+	by one - or, for an item with no schedule, the shipping-history figure."""
+
+	settings = _settings()
+	planning_months = int(planning_months or settings.default_planning_months or 12)
+	grace_days = int(settings.overdue_grace_days if settings.overdue_grace_days is not None else 30)
+	today_date = getdate(today())
+	start_date = today_date - timedelta(days=grace_days)
+	end_date = add_months(today_date, planning_months)
+
+	rows = frappe.db.sql(
+		"""
+		SELECT * FROM (
+			SELECT
+				cs.customer, cs.name AS schedule, cs.release_number, cs.schedule_date,
+				csi.delivery_date, csi.demand_type, csi.quantity, csi.auto_forecast,
+				ROW_NUMBER() OVER (
+					PARTITION BY cs.customer, csi.item_code, csi.delivery_date
+					ORDER BY cs.schedule_date DESC, cs.creation DESC
+				) AS rn
+			FROM `tabCustomer Schedule Item` csi
+			INNER JOIN `tabCustomer Schedule` cs ON cs.name = csi.parent
+			WHERE
+				cs.docstatus = 1
+				AND csi.item_code = %(item)s
+				AND csi.demand_type IN ('Forecast', 'Raw', 'Firm')
+				AND csi.quantity > 0
+				AND csi.delivery_date >= %(start)s
+				AND csi.delivery_date < %(end)s
+		) ranked
+		WHERE rn = 1
+		ORDER BY delivery_date, customer
+		""",
+		{"item": item_code, "start": str(start_date), "end": str(end_date)},
+		as_dict=True,
+	)
+
+	out = {
+		"item_code": item_code,
+		"start_date": str(start_date),
+		"end_date": str(end_date),
+		"planning_months": planning_months,
+		"grace_days": grace_days,
+		"today": str(today_date),
+		"rows": [
+			{
+				"customer": r.customer,
+				"schedule": r.schedule,
+				"release_number": r.release_number,
+				"delivery_date": str(r.delivery_date),
+				"demand_type": r.demand_type,
+				"quantity": flt(r.quantity),
+				"auto_forecast": int(r.auto_forecast or 0),
+			}
+			for r in rows
+		],
+	}
+	out["total"] = sum(r["quantity"] for r in out["rows"])
+	if rows:
+		out["source"] = "Customer Schedule"
+		return out
+
+	# no schedule rows: the shipping-history fallback (if it applies)
+	fallback_on = settings.enable_shipping_fallback_forecast
+	fallback_on = 1 if fallback_on is None else cint(fallback_on)
+	months = int(settings.shipping_fallback_months or 3)
+	company = _company_or_none(settings)
+	demand = _shipping_fallback_map(set(), company, months, planning_months).get(item_code, 0.0) if fallback_on else 0.0
+	shipped = frappe.db.sql(
+		"""
+		SELECT SUM(dni.qty) AS q FROM `tabDelivery Note Item` dni
+		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+		WHERE dni.item_code = %(item)s AND dn.docstatus = 1
+		  AND dn.posting_date >= %(from)s AND dn.posting_date <= %(today)s
+		""",
+		{"item": item_code, "from": str(add_months(today_date, -months)), "today": str(today_date)},
+		as_dict=True,
+	)
+	out["source"] = "Shipping History (No Schedule)" if demand else "None"
+	out["fallback"] = {
+		"enabled": bool(fallback_on),
+		"months": months,
+		"shipped_qty": flt(shipped[0].q) if shipped else 0.0,
+		"demand": demand,
+	}
+	out["total"] = demand
+	return out
 
 
 # ---------------------------------------------------------------------------
@@ -298,13 +392,49 @@ def _min_order_map(items, warehouse=None):
 		filters={"parent": ["in", list(items)], "parenttype": "Item"},
 		fields=["parent", "warehouse", "warehouse_reorder_qty", "material_request_type"],
 	)
+	# The Item's Reorder table says which warehouse a row is for ("Request
+	# for"), but stock here is counted across every warehouse, so a row for
+	# another warehouse (e.g. Finished Goods while the planning warehouse is
+	# Stores) still applies. Rows for the planning warehouse win when present.
+	exact, other = {}, {}
 	for r in reorder_rows:
 		if r.material_request_type and r.material_request_type != "Purchase":
 			continue
-		if warehouse and r.warehouse and r.warehouse != warehouse:
-			continue
-		result[r.parent] = max(result.get(r.parent, 0.0), flt(r.warehouse_reorder_qty))
+		target = exact if (warehouse and r.warehouse == warehouse) else other
+		target[r.parent] = max(target.get(r.parent, 0.0), flt(r.warehouse_reorder_qty))
+	for item, qty in {**other, **exact}.items():
+		result[item] = max(result.get(item, 0.0), qty)
 	return result
+
+
+def _reorder_level_map(items, warehouse=None):
+	"""Item > Reorder table > Re-order Level (warehouse_reorder_level) per
+	item, Purchase-type rows. Stock is compared across all warehouses, so the
+	level is the row for the planning warehouse if there is one; otherwise the
+	rows of the item's other warehouses added together (one level per
+	warehouse). Only items with a level above zero are in the result - the
+	rest have "no level set"."""
+
+	if not items:
+		return {}
+
+	exact, generic = {}, {}
+	rows = frappe.get_all(
+		"Item Reorder",
+		filters={"parent": ["in", list(items)], "parenttype": "Item"},
+		fields=["parent", "warehouse", "warehouse_reorder_level", "material_request_type"],
+	)
+	for r in rows:
+		if r.material_request_type and r.material_request_type != "Purchase":
+			continue
+		level = flt(r.warehouse_reorder_level)
+		if level <= 0:
+			continue
+		if warehouse and r.warehouse == warehouse:
+			exact[r.parent] = max(exact.get(r.parent, 0.0), level)
+		else:
+			generic[r.parent] = generic.get(r.parent, 0.0) + level
+	return {**generic, **exact}
 
 
 def apply_order_rules(net_shortfall, min_order_qty, enabled=True):
@@ -340,6 +470,7 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 	req_date = add_months(today_date, lead_time_months)
 
 	company = _company_or_none(settings)
+	cover_limit = safety.max_cover_months()
 
 	schedule_demand = _schedule_demand_map(start_date, end_date)
 
@@ -365,6 +496,8 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 	moq_on = settings.get("apply_min_order_qty")
 	moq_on = 1 if moq_on is None else cint(moq_on)
 	min_order_map = _min_order_map(items_in_scope, warehouse or settings.default_warehouse) if moq_on else {}
+
+	reorder_level_map = _reorder_level_map(items_in_scope, warehouse or settings.default_warehouse)
 
 	stock_map = _stock_map(items_in_scope)
 	open_po_map = _open_po_map(items_in_scope, company)
@@ -394,7 +527,36 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 			status = "Covered"
 		shortfall = max(net, 0.0)
 		min_qty = min_order_map.get(item_code, 0.0)
-		order_qty = apply_order_rules(shortfall, min_qty, moq_on)
+
+		# Reorder-level gate: with a Re-order Level on the item, a Material
+		# Request is only raised once what is available (stock + open PO +
+		# other open MR) has fallen BELOW that level. No level set = old
+		# behaviour (raise whenever there is a shortfall).
+		available = stock + open_po + other_mr
+		level = reorder_level_map.get(item_code, 0.0)
+		if level > 0:
+			below_level = available + 0.01 < level
+			reorder_check = "Below Reorder Level" if below_level else "Above Reorder Level"
+		else:
+			below_level = True
+			reorder_check = "Not Set"
+
+		if shortfall <= 0.01:
+			mr_decision = "No shortfall"
+		elif not below_level:
+			mr_decision = f"Wait - available {available:,.0f} is not below reorder level {level:,.0f}"
+		else:
+			mr_decision = "Raise MR"
+		order_qty = apply_order_rules(shortfall, min_qty, moq_on) if mr_decision == "Raise MR" else 0.0
+
+		# Months of cover: how many months of (average) demand the stock would
+		# last once this order has arrived. Over the limit => red + approval.
+		monthly_demand = demand / planning_months if planning_months else 0.0
+		cover_now = safety.cover_months(available, 0, monthly_demand)
+		cover_after = safety.cover_months(available, order_qty, monthly_demand)
+		cover_flag = bool(
+			cover_limit > 0 and order_qty > 0.01 and cover_after is not None and cover_after > cover_limit + 0.05
+		)
 		rows.append(
 			{
 				"item_code": item_code,
@@ -405,9 +567,17 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 				"other_open_mr_qty": other_mr,
 				"net_shortfall": shortfall,
 				"net_surplus": max(-net, 0.0),
+				"available_qty": available,
+				"reorder_level": level,
+				"reorder_check": reorder_check,
+				"mr_decision": mr_decision,
 				"min_order_qty": min_qty,
 				"order_qty": order_qty,
 				"moq_extra": max(order_qty - shortfall, 0.0),
+				"monthly_demand": monthly_demand,
+				"cover_now": cover_now,
+				"cover_after": cover_after,
+				"cover_flag": cover_flag,
 				"status": status,
 				"auto_mr_qty": pool_items_map.get(item_code, 0.0),
 			}
@@ -424,7 +594,14 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 		"company": company,
 		"pool_mr": pool_name,
 		"apply_min_order_qty": moq_on,
+		"cover_limit": cover_limit,
 	}
+
+
+def _set_cover_fields(row, info):
+	row.custom_sp_available_qty = info["available_qty"]
+	row.custom_sp_monthly_demand = round(info["monthly_demand"], 2)
+	row.custom_sp_cover_months = info["cover_after"]
 
 
 def _line_description(info, planning_months, lead_time_months):
@@ -434,11 +611,20 @@ def _line_description(info, planning_months, lead_time_months):
 		f"- Other Open MR {info['other_open_mr_qty']:,.0f} = Shortfall "
 		f"{info['net_shortfall']:,.0f} ({planning_months}M horizon, {lead_time_months}M lead time)"
 	)
+	if flt(info.get("reorder_level")) > 0:
+		text += (
+			f". Available {info['available_qty']:,.0f} is below Re-order Level "
+			f"{info['reorder_level']:,.0f}"
+		)
 	if info.get("moq_extra", 0) > 0.01:
 		text += (
 			f". Raised to supplier Minimum Order Qty {info['min_order_qty']:,.0f} "
 			f"(+{info['moq_extra']:,.0f} above shortfall)"
 		)
+	if info.get("cover_after") is not None:
+		text += f". Months of cover after order: {info['cover_after']:,.1f} (monthly demand {info['monthly_demand']:,.0f})"
+		if info.get("cover_flag"):
+			text += f" - ABOVE LIMIT, approval needed"
 	return text
 
 
@@ -460,13 +646,18 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 	lead_time_months = int(lead_time_months or settings.default_lead_time_months or 7)
 	warehouse = _resolve_warehouse(settings, company, override=warehouse)
 	snapshot = compute_planning_snapshot(planning_months, lead_time_months, warehouse=warehouse)
-	req_date = snapshot["required_by"]
+	# a real date, not the snapshot's string: an existing line loaded from the
+	# database carries a date object, and ERPNext's validate_schedule_date takes
+	# min() over all lines - a str next to a date raises TypeError
+	req_date = getdate(snapshot["required_by"])
 
 	pool = _get_or_new_pool_mr(company)
 	existing_rows_by_item = {r.item_code: r for r in (pool.items or [])}
 
-	shortfall_by_item = {r["item_code"]: r for r in snapshot["rows"] if r["net_shortfall"] > 0.01}
-	covered = [r["item_code"] for r in snapshot["rows"] if r["net_shortfall"] <= 0.01]
+	# a line is raised only when there is a shortfall AND (if the item has a
+	# Re-order Level) available stock is below it
+	shortfall_by_item = {r["item_code"]: r for r in snapshot["rows"] if r["order_qty"] > 0.01}
+	covered = [r["item_code"] for r in snapshot["rows"] if r["order_qty"] <= 0.01]
 
 	created, updated, removed = [], [], []
 
@@ -480,7 +671,7 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 		pool.set("items", keep)
 
 	for item_code, info in shortfall_by_item.items():
-		qty = round(info["order_qty"], 2)   # shortfall, or the supplier MOQ if that is larger
+		qty = round(info["order_qty"], 2)   # greatest of shortfall, MOQ and Re-order Qty
 		desc = _line_description(info, snapshot["planning_months"], lead_time_months)
 		row = existing_rows_by_item.get(item_code)
 		still_present = row is not None and row in (pool.items or [])
@@ -494,6 +685,7 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 				row.custom_sp_demand_source = info["demand_source"]
 				changed = True
 			row.description = desc
+			_set_cover_fields(row, info)
 			if changed:
 				updated.append(item_code)
 		else:
@@ -515,6 +707,9 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 					"schedule_date": req_date,
 					"description": desc,
 					"custom_sp_demand_source": info["demand_source"],
+					"custom_sp_available_qty": info["available_qty"],
+					"custom_sp_monthly_demand": round(info["monthly_demand"], 2),
+					"custom_sp_cover_months": info["cover_after"],
 				},
 			)
 			created.append(item_code)
@@ -542,6 +737,7 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 		}
 
 	pool.custom_sp_auto_generated = 1
+	pool.custom_sp_cover_excess = 1 if any(shortfall_by_item[i]["cover_flag"] for i in shortfall_by_item) else 0
 	pool.custom_sp_last_reconciled = frappe.utils.now_datetime()
 	pool.material_request_type = "Purchase"
 	pool.transaction_date = str(getdate(today()))
@@ -625,8 +821,17 @@ def on_delivery_note_change(doc, method=None):
 			warehouse=settings.default_warehouse,
 			triggered_by=f"Delivery Note {doc.name} ({method or 'change'})",
 		)
-	except Exception:
+	except Exception as e:
 		frappe.log_error(
 			title="Schedule Planner: Material Request reconciliation after Delivery Note failed",
 			message=frappe.get_traceback(),
+		)
+		# the Delivery Note itself must still go through, but say why the
+		# Material Request was not updated instead of failing silently
+		frappe.msgprint(
+			f"Delivery Note saved, but the Auto Material Request could not be updated: "
+			f"<b>{frappe.utils.escape_html(str(e))}</b><br><br>Details are in Error Log "
+			f"(Schedule Planner: Material Request reconciliation after Delivery Note failed).",
+			title="Material Request Not Updated",
+			indicator="orange",
 		)
