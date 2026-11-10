@@ -38,13 +38,17 @@ SHIPPING_MONTHS = {
 	"LAST_9_MONTHS_SHIPPING_AVG": 9,
 }
 
-METHODS = ("LAST_4_WEEKS_AVG", *SHIPPING_MONTHS)
+# the customer's own weekly average for the item, taken from the uploaded file
+DOCUMENT_METHOD = "DOCUMENT_AVG"
+
+METHODS = ("LAST_4_WEEKS_AVG", *SHIPPING_MONTHS, DOCUMENT_METHOD)
 
 METHOD_LABELS = {
 	"LAST_4_WEEKS_AVG": "Average of Last 4 Weeks",
 	"LAST_3_MONTHS_SHIPPING_AVG": "Average Weekly Shipment - Last 3 Months",
 	"LAST_6_MONTHS_SHIPPING_AVG": "Average Weekly Shipment - Last 6 Months",
 	"LAST_9_MONTHS_SHIPPING_AVG": "Average Weekly Shipment - Last 9 Months",
+	DOCUMENT_METHOD: "Average of Customer Document",
 }
 
 
@@ -139,23 +143,26 @@ def last_4_week_avg(item_rows):
 	return round(sum(weeks) / 4.0, 2), [round(w, 2) for w in weeks]
 
 
-def shipping_avg(item_code, item_rows, months):
+def shipping_avg(item_code, item_rows, months, customer=None):
 	"""Average weekly Delivery Note qty over the last `months` months
-	(13 / 26 / 39 weeks for 3 / 6 / 9)."""
+	(13 / 26 / 39 weeks for 3 / 6 / 9). When the schedule's customer is given,
+	only THAT customer's Delivery Notes count - an item shared by two customers
+	would otherwise get the combined shipments as the forecast of each."""
 	today_date = getdate(today())
 	from_date = add_months(today_date, -months)
 
 	shipped = frappe.db.sql(
 		"""
-		SELECT SUM(dni.qty) AS total_qty
+		SELECT SUM(IFNULL(NULLIF(dni.stock_qty, 0), dni.qty * IFNULL(NULLIF(dni.conversion_factor, 0), 1))) AS total_qty
 		FROM `tabDelivery Note Item` dni
 		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
 		WHERE dni.item_code = %(item_code)s
 		  AND dn.docstatus = 1
 		  AND dn.posting_date >= %(from_date)s
 		  AND dn.posting_date <= %(today)s
+		  AND (%(customer)s = '' OR dn.customer = %(customer)s)
 		""",
-		{"item_code": item_code, "from_date": str(from_date), "today": str(today_date)},
+		{"item_code": item_code, "from_date": str(from_date), "today": str(today_date), "customer": customer or ""},
 		as_dict=True,
 	)
 	total_shipped = flt(shipped[0].total_qty) if shipped and shipped[0].total_qty else 0
@@ -172,52 +179,227 @@ def last_3_month_shipping_avg(item_code, item_rows):
 	return shipping_avg(item_code, item_rows, 3)
 
 
-def _weekly_value(method, item_code, item_rows):
+def _weekly_value(method, item_code, item_rows, customer=None):
 	if method == "LAST_4_WEEKS_AVG":
 		return last_4_week_avg(item_rows)
-	return shipping_avg(item_code, item_rows, SHIPPING_MONTHS[method])
+	return shipping_avg(item_code, item_rows, SHIPPING_MONTHS[method], customer)
+
+
+# ---------------------------------------------------------------------------
+# Document average (the customer's own weekly rate for the item)
+#
+# The auto-forecast weekly qty is, per item, the HIGHER of
+#   - the chosen forecast method (last 4 weeks / shipping averages), and
+#   - the document average: all quantity the customer's file carries for the
+#     item divided by the weeks between the item's start and end date.
+# Schedule Planning Settings decide whether this comparison is on and how the
+# start / end date are taken.
+# ---------------------------------------------------------------------------
+
+DOC_PERIOD_ITEM_SHEET_END = "Item first date to end of file"
+DOC_PERIOD_ITEM_LAST_QTY = "Item first date to item's last quantity"
+DOC_PERIOD_SHEET = "First date of file to end of file"
+DOC_PERIOD_MODES = (DOC_PERIOD_ITEM_SHEET_END, DOC_PERIOD_ITEM_LAST_QTY, DOC_PERIOD_SHEET)
+
+SOURCE_METHOD = "Forecast Method"
+SOURCE_DOCUMENT = "Document Average"
+
+
+def document_average_settings():
+	"""(enabled, period mode) from Schedule Planning Settings, with defaults
+	so the engine also works before the settings were ever saved."""
+	enabled, mode = 1, DOC_PERIOD_ITEM_SHEET_END
+	try:
+		settings = frappe.get_cached_doc("Schedule Planning Settings")
+		if settings.get("use_document_average") not in (None, ""):
+			enabled = int(settings.get("use_document_average"))
+		mode = settings.get("document_avg_period") or mode
+	except Exception:
+		pass
+	if mode not in DOC_PERIOD_MODES:
+		mode = DOC_PERIOD_ITEM_SHEET_END
+	return bool(enabled), mode
+
+
+def sheet_start_date(rows):
+	"""First date of the customer's file: the earliest item start (zero or
+	non-zero quantity), else the earliest quantity date."""
+	dates = []
+	for r in rows:
+		if r.get("auto_forecast"):
+			continue
+		dates.append(getdate(r["item_start"]) if r.get("item_start") else getdate(r["delivery_date"]))
+	return min(dates) if dates else None
+
+
+def document_weekly(item_rows, mode=None, sheet_start=None):
+	"""The customer's own weekly rate for ONE item, over its whole period.
+
+	Returns None when the item has no customer quantity, else a dict with the
+	weekly qty, the quantity it was based on and the period used. Weeks are
+	counted from the start date to the end of the last bucket, so a week-start
+	date counts as a full 7 days (a file of 4 weekly columns = 4 weeks)."""
+	mode = mode or document_average_settings()[1]
+	own = [r for r in item_rows if not r.get("auto_forecast") and flt(r.get("quantity")) > 0]
+	if not own:
+		return None
+
+	total = sum(flt(r["quantity"]) for r in own)
+	last_row = max(own, key=lambda r: getdate(r["delivery_date"]))
+	first_qty = min(getdate(r["delivery_date"]) for r in own)
+	last_qty = getdate(last_row["delivery_date"])
+	item_start = min([getdate(r["item_start"]) for r in item_rows if r.get("item_start")] + [first_qty])
+	file_end = max(d for d in (_horizon_end(item_rows), last_qty) if d)
+
+	if mode == DOC_PERIOD_ITEM_LAST_QTY:
+		start, end = item_start, last_qty
+	elif mode == DOC_PERIOD_SHEET:
+		start, end = min(sheet_start, item_start) if sheet_start else item_start, file_end
+	else:
+		start, end = item_start, file_end
+
+	# a monthly bucket stands for its whole month, not for 7 days
+	tail = flt(last_row.get("bucket_days")) if end == last_qty and flt(last_row.get("bucket_days")) > 7 else 7
+	weeks = max(((end - start).days + tail) / 7.0, 1.0)
+	return {
+		"weekly": round(total / weeks, 2),
+		"total": round(total, 2),
+		"from": str(start),
+		"to": str(end),
+		"weeks": round(weeks, 2),
+		"mode": mode,
+	}
+
+
+def round_qty(value):
+	"""Forecast quantities are whole numbers (half rounds up: 631.5 -> 632)."""
+	return float(int(flt(value) + 0.5))
+
+
+def resolve_item(item_code, item_rows, default_method, item_methods=None, sheet_start=None, source="best", memo=None, customer=None):
+	"""Everything the forecast needs to know about ONE item.
+
+	The item's method is the one the user picked for it (item_methods), else the
+	dialog's default. When the user did not pick one and the customer
+	document's own weekly average is higher than that method's figure, the item
+	is switched to the "Average of Customer Document" method - the dropdown shows
+	it, and the user can change it back. A method the user picked is never
+	overridden.
+
+	source: "best"     the real behaviour above
+	        "method"   force the item's own / default method (no switch)
+	        "document" force the document average"""
+	explicit = (item_methods or {}).get(item_code)
+	base_method = validate_method(explicit or default_method)
+
+	doc_enabled, mode = document_average_settings()
+	doc = document_weekly(item_rows, mode, sheet_start)
+	doc_qty = flt(doc["weekly"]) if doc else 0.0
+
+	if base_method == DOCUMENT_METHOD:
+		base_qty, sample = doc_qty, ([doc_qty] if doc else [])
+	else:
+		key = (base_method, item_code)
+		if memo is not None and key in memo:
+			base_qty, sample = memo[key]
+		else:
+			base_qty, sample = _weekly_value(base_method, item_code, item_rows, customer)
+			if memo is not None:
+				memo[key] = (base_qty, sample)
+	base_qty = flt(base_qty)
+
+	switched = bool(not explicit and doc_enabled and base_method != DOCUMENT_METHOD and doc_qty > base_qty)
+	method = DOCUMENT_METHOD if switched else base_method
+	if source == "method":
+		method, switched = base_method, False
+	elif source == "document":
+		method = DOCUMENT_METHOD
+
+	weekly = doc_qty if method == DOCUMENT_METHOD else base_qty
+	return {
+		"method": method,
+		"base_method": base_method,
+		"switched": switched,
+		"weekly": round_qty(weekly),
+		"source": SOURCE_DOCUMENT if method == DOCUMENT_METHOD else SOURCE_METHOD,
+		"method_weekly": round(base_qty, 2),
+		"document_weekly": round(doc_qty, 2),
+		"document": doc,
+		"document_enabled": doc_enabled,
+		"sample": sample,
+	}
 
 
 # ---------------------------------------------------------------------------
 # Preview (used live in the dialog whenever the method dropdown changes)
 # ---------------------------------------------------------------------------
 
-def generated_qty_by_item(rows, target_months, method, selected_items=None, item_methods=None):
+def generated_qty_by_item(
+	rows, target_months, method, selected_items=None, item_methods=None, source="best", memo=None, customer=None
+):
 	"""{item_code: total qty the auto-forecast would add} for these rows - the
 	same numbers extend_rows() will really create (only the NEW rows count,
 	not an auto-forecast already sitting in the schedule)."""
 
 	original = {id(r) for r in rows}
 	totals = defaultdict(float)
-	for row in extend_rows(rows, target_months, method, selected_items=selected_items, item_methods=item_methods):
+	for row in _extend(
+		rows,
+		target_months,
+		method,
+		selected_items=selected_items,
+		item_methods=item_methods,
+		source=source,
+		memo=memo,
+		customer=customer,
+	):
 		if id(row) not in original and row.get("auto_forecast"):
 			totals[row["item_code"]] += flt(row["quantity"])
 	return {k: round(v, 2) for k, v in totals.items()}
 
 
-def build_preview(rows, method, target_months=None, item_methods=None):
+def build_preview(rows, method, target_months=None, item_methods=None, customer=None):
 	method = validate_method(method)
-	generated = {}
+	memo = {}
+	generated, by_method, by_document = {}, {}, {}
 	if target_months:
-		generated = generated_qty_by_item(rows, int(target_months), method, item_methods=item_methods)
+		months = int(target_months)
+		kw = dict(item_methods=item_methods, memo=memo, customer=customer)
+		generated = generated_qty_by_item(rows, months, method, **kw)
+		by_method = generated_qty_by_item(rows, months, method, source="method", **kw)
+		by_document = generated_qty_by_item(rows, months, method, source="document", **kw)
 
 	by_item = defaultdict(list)
 	for row in rows:
 		by_item[row["item_code"]].append(row)
 
+	sheet_start = sheet_start_date(rows)
 	preview = []
 	for item_code, item_rows in by_item.items():
 		item_rows = sorted(item_rows, key=lambda x: x["delivery_date"])
-		item_method = method_for(item_code, method, item_methods)
-		value, sample = _weekly_value(item_method, item_code, item_rows)
+		info = resolve_item(item_code, item_rows, method, item_methods, sheet_start, memo=memo, customer=customer)
+		doc = info["document"] or {}
 		preview.append(
 			{
 				"item_code": item_code,
-				"method": item_method,
-				"description": METHOD_LABELS[item_method],
-				"predicted_value": value,
-				"sample_values": sample,
+				# the method this item will really use (may be the document average)
+				"method": info["method"],
+				"base_method": info["base_method"],
+				"auto_switched": info["switched"],
+				"description": METHOD_LABELS[info["method"]],
+				"predicted_value": info["weekly"],
+				"method_value": info["method_weekly"],
+				"document_value": info["document_weekly"],
+				"document_from": doc.get("from"),
+				"document_to": doc.get("to"),
+				"document_weeks": doc.get("weeks"),
+				"document_total": doc.get("total"),
+				"used": info["source"],
+				"document_enabled": info["document_enabled"],
+				"sample_values": info["sample"],
 				"auto_qty": generated.get(item_code, 0),
+				"auto_qty_method": by_method.get(item_code, 0),
+				"auto_qty_document": by_document.get(item_code, 0),
 			}
 		)
 	return preview
@@ -227,15 +409,19 @@ def build_preview(rows, method, target_months=None, item_methods=None):
 # Extension - generates the actual future weekly rows
 # ---------------------------------------------------------------------------
 
-def extend_rows(rows, target_months, method, selected_items=None, item_methods=None):
+def extend_rows(rows, target_months, method, selected_items=None, item_methods=None, customer=None):
 	"""rows: list of row dicts (item_code, item_name, delivery_date, quantity,
 	demand_type[, auto_forecast]). Returns a NEW list (original + generated).
 
-	target_months is measured per item from that item's own first delivery
-	date to its last, then extended forward - so items with a shorter
-	history than others are each topped up fairly, rather than everyone
-	being extended to one shared calendar end-date."""
+	target_months is counted from each item's own first date in the sheet (zero
+	or non-zero quantity); the auto-forecast starts the week after the item's
+	last non-zero quantity and runs to first date + target_months. The weekly
+	qty is the higher of the chosen method and the document average (when
+	that comparison is switched on in the settings)."""
+	return _extend(rows, target_months, method, selected_items, item_methods, customer=customer)
 
+
+def _extend(rows, target_months, method, selected_items=None, item_methods=None, source="best", memo=None, customer=None):
 	method = validate_method(method)
 	target_months = int(target_months)
 
@@ -244,32 +430,45 @@ def extend_rows(rows, target_months, method, selected_items=None, item_methods=N
 		by_item[row["item_code"]].append(row)
 
 	extended = list(rows)
+	sheet_start = sheet_start_date(rows)
 
 	for item_code, item_rows in by_item.items():
 		if selected_items is not None and item_code not in selected_items:
 			continue
 
 		item_sorted = sorted(item_rows, key=lambda x: x["delivery_date"])
-		months_covered = len({getdate(r["delivery_date"]).strftime("%Y-%m") for r in item_sorted})
-		months_to_add = target_months - months_covered
-		if months_to_add <= 0:
-			continue
+		# first date = the item's first date in the sheet, zero OR non-zero quantity
+		# (item_start, recorded by the file reader); if a reader did not record it,
+		# the item's first customer quantity is used.
+		starts = [getdate(r["item_start"]) for r in item_sorted if r.get("item_start")]
+		own_dates = [getdate(r["delivery_date"]) for r in item_sorted if not r.get("auto_forecast")]
+		first_date = min(starts + own_dates) if (starts or own_dates) else getdate(item_sorted[0]["delivery_date"])
+		qty_dates = [getdate(r["delivery_date"]) for r in item_sorted if (r.get("quantity") or 0) > 0]
+		last_date = max(qty_dates) if qty_dates else getdate(item_sorted[-1]["delivery_date"])
+		item_end = add_months(first_date, target_months)
 
-		last_date = getdate(item_sorted[-1]["delivery_date"])
-		item_end = last_date + relativedelta(months=months_to_add)
-
-		weekly_qty, _ = _weekly_value(method_for(item_code, method, item_methods), item_code, item_sorted)
+		info = resolve_item(
+			item_code, item_sorted, method, item_methods, sheet_start, source=source, memo=memo, customer=customer
+		)
+		weekly_qty, used = info["weekly"], info["source"]
 		if not weekly_qty or weekly_qty <= 0:
 			continue
+
+		basis = {
+			"source": used,
+			"method": info["method"],
+			"base_method": info["base_method"],
+			"auto_switched": info["switched"],
+			"method_weekly": info["method_weekly"],
+			"document_weekly": info["document_weekly"],
+			"document": info["document"],
+			"weekly_used": weekly_qty,
+		}
 
 		existing_dates = {str(getdate(r["delivery_date"])) for r in item_sorted}
 		item_name = item_sorted[0].get("item_name", item_code)
 
-		# Weeks the customer's file covers but left empty are the customer's
-		# own zeros - forecast starts after the file's horizon, not inside it.
-		file_end = _horizon_end(item_sorted)
-		start_from = max(last_date, file_end) if file_end else last_date
-		next_date = start_from + timedelta(days=7)
+		next_date = last_date + timedelta(days=7)
 		while next_date <= item_end:
 			date_key = str(next_date)
 			if date_key not in existing_dates:
@@ -278,9 +477,11 @@ def extend_rows(rows, target_months, method, selected_items=None, item_methods=N
 						"item_code": item_code,
 						"item_name": item_name,
 						"delivery_date": date_key,
-						"quantity": round(weekly_qty, 2),
+						"quantity": weekly_qty,
 						"demand_type": "Forecast",
 						"auto_forecast": 1,
+						"forecast_source": used,
+						"forecast_basis": basis,
 					}
 				)
 				existing_dates.add(date_key)

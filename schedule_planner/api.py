@@ -66,12 +66,18 @@ def get_saved_forecast_methods(customer):
 
 def save_forecast_methods(customer, forecast_method, item_methods, items):
 	"""Remember what was used so the next upload for this customer starts from
-	it: the dialog's default, and the method of each item that took part."""
+	it: the dialog's default, and the method the user picked for an item. An
+	item left on the default (or switched to the document average by the
+	system) is not remembered - it is worked out afresh each time."""
 	if not customer or not _customer_has_method_fields():
 		return
 	_default, saved = get_saved_forecast_methods(customer)
 	for item in items:
-		saved[str(item)] = forecast_engine.method_for(item, forecast_method, item_methods)
+		picked = (item_methods or {}).get(str(item))
+		if picked and picked != forecast_method:
+			saved[str(item)] = picked
+		else:
+			saved.pop(str(item), None)
 	frappe.db.set_value(
 		"Customer",
 		customer,
@@ -93,10 +99,18 @@ def _attach_forecast_defaults(analysis, customer):
 	return analysis
 
 
-def _method_labels(items, default, item_methods):
-	"""{item_code: method label} stored on the schedule rows of each item."""
+def _method_labels(items, default, item_methods, generated_rows=None):
+	"""{item_code: method label} stored on the schedule rows of each item - the
+	method it really used (which can be the document average, switched in by
+	the system), else the one picked / the default."""
+	effective = {}
+	for r in generated_rows or []:
+		if r.get("auto_forecast") and r.get("forecast_basis"):
+			effective[r["item_code"]] = r["forecast_basis"]["method"]
 	return {
-		item: forecast_engine.METHOD_LABELS[forecast_engine.method_for(item, default, item_methods)]
+		item: forecast_engine.METHOD_LABELS[
+			effective.get(item) or forecast_engine.method_for(item, default, item_methods)
+		]
 		for item in items
 	}
 
@@ -259,6 +273,7 @@ def update_schedule_item_mapping(schedule_name, mapping_json):
 			"demand_type": r.demand_type,
 			"auto_forecast": r.auto_forecast,
 			"forecast_method": r.forecast_method,
+			"item_start": str(r.item_start_date) if r.item_start_date else None,
 		}
 		for r in doc.schedule_items
 	]
@@ -277,6 +292,7 @@ def update_schedule_item_mapping(schedule_name, mapping_json):
 				"demand_type": row["demand_type"],
 				"auto_forecast": row.get("auto_forecast", 0),
 				"forecast_method": row.get("forecast_method"),
+				"item_start_date": row.get("item_start"),
 			},
 		)
 	doc.save(ignore_permissions=True)
@@ -292,12 +308,13 @@ def _rows_item_details(rows):
 	for item_code, item_rows in sorted(by_item.items()):
 		dates = [getdate(r["delivery_date"]) for r in item_rows]
 		months = {d.strftime("%Y-%m") for d in dates}
+		sheet_start = [getdate(r["item_start"]) for r in item_rows if r.get("item_start")]
 		details.append(
 			{
 				"item_code": item_code,
 				"item_name": item_rows[0].get("item_name", item_code),
 				"months": len(months),
-				"from_date": str(min(dates)),
+				"from_date": str(min(sheet_start + dates)),
 				"to_date": str(max(dates)),
 				"total_qty": sum(flt(r["quantity"]) for r in item_rows),
 			}
@@ -310,7 +327,9 @@ def _rows_item_details(rows):
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
-def preview_forecast_method(rows_json, forecast_method, selected_items=None, target_months=None, item_methods=None):
+def preview_forecast_method(
+	rows_json, forecast_method, selected_items=None, target_months=None, item_methods=None, customer=None
+):
 	rows = json.loads(rows_json)
 	selected = _parse_selected_items(selected_items)
 
@@ -321,9 +340,9 @@ def preview_forecast_method(rows_json, forecast_method, selected_items=None, tar
 		return []
 
 	preview = forecast_engine.build_preview(
-		rows, forecast_method, target_months, item_methods=_parse_item_methods(item_methods)
+		rows, forecast_method, target_months, item_methods=_parse_item_methods(item_methods), customer=customer
 	)
-	return safety.annotate_preview(preview, rows)
+	return safety.annotate_preview(preview, rows, customer)
 
 
 @frappe.whitelist()
@@ -339,12 +358,13 @@ def preview_forecast_for_schedule(
 	rows = frappe.get_all(
 		"Customer Schedule Item",
 		filters={"parent": schedule_name},
-		fields=["item_code", "item_name", "delivery_date", "quantity", "demand_type", "auto_forecast"],
+		fields=["item_code", "item_name", "delivery_date", "quantity", "demand_type", "auto_forecast", "item_start_date"],
 	)
-	horizon_end = frappe.db.get_value("Customer Schedule", schedule_name, "horizon_end")
+	horizon_end, customer = frappe.db.get_value("Customer Schedule", schedule_name, ["horizon_end", "customer"])
 	rows = [dict(r) for r in rows if flt(r.quantity) > 0]
 	for r in rows:
 		r["delivery_date"] = str(r["delivery_date"])
+		r["item_start"] = str(r["item_start_date"]) if r.get("item_start_date") else None
 		r["horizon_end"] = str(horizon_end) if horizon_end else None
 
 	if selected is not None:
@@ -354,9 +374,9 @@ def preview_forecast_for_schedule(
 		return []
 
 	preview = forecast_engine.build_preview(
-		rows, forecast_method, target_months, item_methods=_parse_item_methods(item_methods)
+		rows, forecast_method, target_months, item_methods=_parse_item_methods(item_methods), customer=customer
 	)
-	return safety.annotate_preview(preview, rows)
+	return safety.annotate_preview(preview, rows, customer)
 
 
 # ---------------------------------------------------------------------------
@@ -433,12 +453,15 @@ def create_schedule_with_forecast(
 		)
 
 	all_rows = forecast_engine.extend_rows(
-		rows, target_months, forecast_method, selected_items=selected, item_methods=methods
+		rows, target_months, forecast_method, selected_items=selected, item_methods=methods, customer=customer
 	)
 	part_by_item = {r["item_code"]: r.get("file_part_no") for r in rows if r.get("file_part_no")}
 	# only items that take part in auto-forecast get a method recorded
 	label_by_item = _method_labels(
-		{r["item_code"] for r in rows if selected is None or r["item_code"] in selected}, forecast_method, methods
+		{r["item_code"] for r in rows if selected is None or r["item_code"] in selected},
+		forecast_method,
+		methods,
+		all_rows,
 	)
 
 	included_qty = round(sum(flt(r["quantity"]) for r in rows), 2)
@@ -484,6 +507,9 @@ def create_schedule_with_forecast(
 				"demand_type": row["demand_type"],
 				"auto_forecast": row.get("auto_forecast", 0),
 				"forecast_method": label_by_item.get(row["item_code"]),
+				"item_start_date": row.get("item_start"),
+				"forecast_source": row.get("forecast_source"),
+				"forecast_basis_json": json.dumps(row["forecast_basis"]) if row.get("forecast_basis") else None,
 			},
 		)
 
@@ -539,18 +565,20 @@ def extend_forecast(schedule_name, target_months, forecast_method, selected_item
 			"quantity": r.quantity,
 			"demand_type": r.demand_type,
 			"auto_forecast": r.auto_forecast,
+			"item_start": str(r.item_start_date) if r.item_start_date else None,
 			"horizon_end": str(doc.horizon_end) if doc.horizon_end else None,
 		}
 		for r in doc.schedule_items
 	]
 
 	all_rows = forecast_engine.extend_rows(
-		existing_rows, target_months, forecast_method, selected_items=selected, item_methods=methods
+		existing_rows, target_months, forecast_method, selected_items=selected, item_methods=methods, customer=doc.customer
 	)
 	label_by_item = _method_labels(
 		{r.item_code for r in doc.schedule_items if selected is None or r.item_code in selected},
 		forecast_method,
 		methods,
+		all_rows,
 	)
 	# rows already on the schedule carry the method now chosen for their item
 	for r in doc.schedule_items:
@@ -576,6 +604,9 @@ def extend_forecast(schedule_name, target_months, forecast_method, selected_item
 				"demand_type": row["demand_type"],
 				"auto_forecast": row.get("auto_forecast", 0),
 				"forecast_method": label_by_item.get(row["item_code"]),
+				"item_start_date": row.get("item_start"),
+				"forecast_source": row.get("forecast_source"),
+				"forecast_basis_json": json.dumps(row["forecast_basis"]) if row.get("forecast_basis") else None,
 			},
 		)
 		existing_keys.add(key)
@@ -601,7 +632,7 @@ def get_schedule_month_info(schedule_name):
 	rows = frappe.get_all(
 		"Customer Schedule Item",
 		filters={"parent": schedule_name},
-		fields=["item_code", "item_name", "delivery_date", "quantity", "demand_type", "auto_forecast", "forecast_method"],
+		fields=["item_code", "item_name", "delivery_date", "quantity", "demand_type", "auto_forecast", "forecast_method", "item_start_date"],
 	)
 	positive_rows = [r for r in rows if flt(r.quantity) > 0]
 	if not positive_rows:
@@ -623,7 +654,7 @@ def get_schedule_month_info(schedule_name):
 				"item_code": item_code,
 				"item_name": item_rows[0].item_name or item_code,
 				"months": len(item_months),
-				"from_date": str(min(item_dates)),
+				"from_date": str(min([getdate(r.item_start_date) for r in item_rows if r.item_start_date] + item_dates)),
 				"to_date": str(max(item_dates)),
 				"total_qty": sum(flt(r.quantity) for r in item_rows),
 				# method chosen for this item last time (shown as the dropdown's start value)

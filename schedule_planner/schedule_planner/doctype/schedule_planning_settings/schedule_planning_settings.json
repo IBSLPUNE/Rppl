@@ -27,6 +27,9 @@
   "column_break_2",
   "llm_api_key",
   "llm_endpoint",
+  "auto_forecast_section",
+  "use_document_average",
+  "document_avg_period",
   "safety_section",
   "forecast_limit_multiplier",
   "max_cover_months",
@@ -212,6 +215,27 @@
    "options": "Role",
    "default": "System Manager",
    "description": "Users with this role can approve a forecast above the limit and submit a Material Request with excess cover."
+  },
+  {
+   "fieldname": "auto_forecast_section",
+   "fieldtype": "Section Break",
+   "label": "Auto-Forecast: Customer Document Average"
+  },
+  {
+   "default": "1",
+   "fieldname": "use_document_average",
+   "fieldtype": "Check",
+   "label": "Switch Items to the Document Average When It Is Higher",
+   "description": "Per item, if the customer document's own weekly average (the item's total quantity in the file / weeks of its period) is higher than the chosen Forecast Method's figure, the item's method is switched to 'Average of Customer Document' automatically. The user can change any item back. Untick to never switch automatically."
+  },
+  {
+   "default": "Item first date to end of file",
+   "depends_on": "use_document_average",
+   "fieldname": "document_avg_period",
+   "fieldtype": "Select",
+   "label": "Document Average Period",
+   "options": "Item first date to end of file\nItem first date to item's last quantity\nFirst date of file to end of file",
+   "description": "Which dates the document average is taken over. 'First date' is the item's first date in the sheet, zero or non-zero quantity. 'End of file' is the last week the customer's sheet covers (zero weeks included). 'Item's last quantity' ignores the zero weeks after the last quantity. 'First date of file' uses the same start for every item."
   }
  ],
  "index_web_pages_for_search": 1,

@@ -2,13 +2,55 @@
 // For license information, please see license.txt
 
 // Months-of-cover warning on the Auto Material Request: after this order
-// arrives, how many months of demand will the stock cover? Over the limit
+// arrives, how many months of demand will the stock cover (counted week by week
+// against the demand of each week)? Over the limit
 // (Schedule Planning Settings) => red, and Submit needs the approver role plus
 // a written reason. utils/safety.py enforces the same rule on the server.
 
 const SP_MR = { limit: 0, can_approve: false, role: "", loaded: false };
 
+// Same week-by-week rule as safety.cover_from_profile on the server: the
+// stock (+ this order) is used up against week 1's demand, then week 2's...,
+// weeks become months at 7 / 30.4375. The profile is stored on the line
+// (Demand by Month); a line made before profiles existed falls back to the
+// flat figure.
+const SP_DAYS_PER_MONTH = 30.4375;
+
+function sp_mr_profile(row) {
+	try {
+		const p = row.custom_sp_demand_buckets ? JSON.parse(row.custom_sp_demand_buckets) : null;
+		if (p && Array.isArray(p.b)) return { b: p.b.map((x) => flt(x)), t: flt(p.t) };
+	} catch (e) {
+		/* fall through to the flat figure */
+	}
+	return null;
+}
+
+function sp_mr_round1(x) {
+	return Math.floor(x * 10 + 0.5) / 10;
+}
+
 function sp_mr_cover(row) {
+	const profile = sp_mr_profile(row);
+	if (profile) {
+		if (!profile.b.some((x) => x > 0) && profile.t <= 0) return null;
+		let remaining = Math.max(flt(row.custom_sp_available_qty) + flt(row.qty), 0);
+		if (remaining <= 0) return 0;
+		let elapsed = 0;
+		for (const demand of profile.b) {
+			if (demand <= 0) {
+				elapsed += 1;
+			} else if (remaining >= demand) {
+				remaining -= demand;
+				elapsed += 1;
+			} else {
+				return sp_mr_round1(((elapsed + remaining / demand) * 7) / SP_DAYS_PER_MONTH);
+			}
+		}
+		let months = (elapsed * 7) / SP_DAYS_PER_MONTH;
+		if (profile.t > 0) months += remaining / profile.t;
+		return sp_mr_round1(months);
+	}
 	const monthly = flt(row.custom_sp_monthly_demand);
 	if (monthly <= 0) return null;
 	return Math.round(((flt(row.custom_sp_available_qty) + flt(row.qty)) / monthly) * 10) / 10;

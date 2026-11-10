@@ -54,10 +54,23 @@ live MR is always internally consistent no matter what triggered the run):
 
 from datetime import timedelta
 
+import json
 import frappe
 from frappe.utils import add_months, cint, flt, getdate, today
 
 from schedule_planner.utils import safety
+
+# Customer schedules, demand, stock and every limit are in the item's STOCK UOM
+# (Nos). Purchase Orders, Material Requests and Delivery Notes can be raised in
+# another UOM, so their quantities are converted to stock UOM before they are
+# compared with demand/stock. "conversion_factor" = stock units per 1 unit of
+# the line's own UOM.
+_DNI_STOCK_QTY = "IFNULL(NULLIF(dni.stock_qty, 0), dni.qty * IFNULL(NULLIF(dni.conversion_factor, 0), 1))"
+_POI_OPEN_STOCK_QTY = "(poi.qty - IFNULL(poi.received_qty, 0)) * IFNULL(NULLIF(poi.conversion_factor, 0), 1)"
+_MRI_OPEN_STOCK_QTY = (
+	"IFNULL(NULLIF(mri.stock_qty, 0), mri.qty * IFNULL(NULLIF(mri.conversion_factor, 0), 1))"
+	" - IFNULL(mri.ordered_qty, 0)"
+)
 
 
 def _settings():
@@ -126,6 +139,267 @@ def _schedule_demand_map(start_date, end_date):
 	return {r.item_code: flt(r.total_required_qty) for r in rows}
 
 
+DAYS_PER_MONTH = safety.DAYS_PER_MONTH
+
+
+def _customer_rates(rows):
+	"""Monthly rate of each customer's demand for ONE item: what the customer's
+	latest schedule holds for the item in the window, divided by the months
+	between its first and last demand date (the last date counts as a full
+	week). rows: anything with customer, delivery_date, quantity. Two customers
+	with 6 and 9 months of data each keep their own rate; the item's monthly
+	demand is the sum of the rates."""
+	by_customer = {}
+	for r in rows:
+		qty = flt(r["quantity"] if isinstance(r, dict) else r.quantity)
+		if qty <= 0:
+			continue
+		customer = r["customer"] if isinstance(r, dict) else r.customer
+		when = getdate(r["delivery_date"] if isinstance(r, dict) else r.delivery_date)
+		c = by_customer.setdefault(customer, {"customer": customer, "total": 0.0, "first": when, "last": when})
+		c["total"] += qty
+		c["first"] = min(c["first"], when)
+		c["last"] = max(c["last"], when)
+	out = []
+	for c in sorted(by_customer.values(), key=lambda x: x["customer"] or ""):
+		months = max(((c["last"] - c["first"]).days + 7) / DAYS_PER_MONTH, 1.0)
+		out.append(
+			{
+				"customer": c["customer"],
+				"total": round(c["total"], 2),
+				"from": str(c["first"]),
+				"to": str(c["last"]),
+				"months": round(months, 2),
+				"rate": round(c["total"] / months, 2),
+			}
+		)
+	return out
+
+
+def _schedule_demand_rows(start_date, end_date):
+	"""The rows _schedule_demand_map adds up (latest submitted schedule per
+	customer + item + delivery date, inside the window), one by one."""
+	return frappe.db.sql(
+		"""
+		SELECT item_code, customer, delivery_date, quantity FROM (
+			SELECT
+				csi.item_code,
+				cs.customer,
+				csi.delivery_date,
+				csi.quantity,
+				ROW_NUMBER() OVER (
+					PARTITION BY cs.customer, csi.item_code, csi.delivery_date
+					ORDER BY cs.schedule_date DESC, cs.creation DESC
+				) AS rn
+			FROM `tabCustomer Schedule Item` csi
+			INNER JOIN `tabCustomer Schedule` cs ON cs.name = csi.parent
+			WHERE
+				cs.docstatus = 1
+				AND csi.demand_type IN ('Forecast', 'Raw', 'Firm')
+				AND csi.quantity > 0
+				AND csi.delivery_date >= %(start)s
+				AND csi.delivery_date < %(end)s
+		) ranked
+		WHERE rn = 1
+		""",
+		{"start": str(start_date), "end": str(end_date)},
+		as_dict=True,
+	)
+
+
+def _week_count(today_date, planning_months):
+	"""Weeks between today and the end of the planning window."""
+	return max(-(-(add_months(today_date, int(planning_months)) - today_date).days // 7), 1)
+
+
+def _week_buckets(rows, today_date, planning_months):
+	"""[qty of week 1, week 2, ...]: week k runs from today + 7(k-1) days to
+	today + 7k days; overdue demand (inside the grace window) is in week 1."""
+	n = _week_count(today_date, planning_months)
+	buckets = [0.0] * n
+	for r in rows:
+		when = getdate(r["delivery_date"] if isinstance(r, dict) else r.delivery_date)
+		index = min(max((when - today_date).days, 0) // 7, n - 1)
+		buckets[index] += flt(r["quantity"] if isinstance(r, dict) else r.quantity)
+	return buckets
+
+
+def _demand_profiles(start_date, end_date, today_date, planning_months):
+	"""{item_code: {"total", "monthly", "profile", "rates"}} from the
+	customers' schedules - monthly is the sum of each customer's own rate,
+	profile is what the week-by-week cover is worked out from."""
+	by_item = {}
+	for r in _schedule_demand_rows(start_date, end_date):
+		by_item.setdefault(r.item_code, []).append(r)
+	out = {}
+	for item_code, rows in by_item.items():
+		rates = _customer_rates(rows)
+		monthly = round(sum(c["rate"] for c in rates), 2)
+		buckets = _week_buckets(rows, today_date, planning_months)
+		out[item_code] = {
+			"total": sum(flt(r.quantity) for r in rows),
+			"monthly": monthly,
+			"profile": safety.make_profile(buckets, monthly),
+			"rates": rates,
+		}
+	return out
+
+
+def _monthly_demand(rows):
+	"""Month by month: what the customer sent (Firm; Forecast/Raw) and what
+	the system added as auto forecast - the same rows the total is made of."""
+	months = {}
+	for r in rows:
+		key = getdate(r.delivery_date).strftime("%Y-%m")
+		m = months.setdefault(key, {"month": key, "firm": 0.0, "forecast": 0.0, "auto": 0.0})
+		qty = flt(r.quantity)
+		if r.auto_forecast:
+			m["auto"] += qty
+		elif r.demand_type == "Firm":
+			m["firm"] += qty
+		else:
+			m["forecast"] += qty
+	out = []
+	for key in sorted(months):
+		m = months[key]
+		m.update({k: round(m[k], 2) for k in ("firm", "forecast", "auto")})
+		m["total"] = round(m["firm"] + m["forecast"] + m["auto"], 2)
+		out.append(m)
+	return out
+
+
+def _forecast_basis(item_code, rows):
+	"""How each auto-forecast in the breakup was worked out, so the client can
+	follow the number: which method, which period, how much was shipped (or
+	supplied by the customer) in it and how that became the weekly qty.
+	Shipment figures are re-read for the period ending on the day the
+	schedule was created, i.e. the window the forecast really used."""
+
+	from schedule_planner.utils import forecast_engine as fe
+
+	by_schedule = {}
+	for r in rows:
+		if r.auto_forecast:
+			by_schedule.setdefault(r.schedule, []).append(r)
+
+	out = []
+	for schedule, arows in by_schedule.items():
+		arows = sorted(arows, key=lambda r: r.delivery_date)
+		first = arows[0]
+		method = fe.method_from_label(first.forecast_method)
+		basis = {
+			"schedule": schedule,
+			"customer": first.customer,
+			"method": method,
+			"method_label": fe.METHOD_LABELS.get(method) or first.forecast_method or "Not recorded",
+			"weekly_used": round(sum(flt(r.quantity) for r in arows) / len(arows), 2),
+			"auto_from": str(arows[0].delivery_date),
+			"auto_to": str(arows[-1].delivery_date),
+			"auto_weeks": len(arows),
+			"auto_total": round(sum(flt(r.quantity) for r in arows), 2),
+			"created": str(getdate(first.creation)),
+			"source": first.forecast_source or "",
+		}
+		try:
+			stored = json.loads(first.forecast_basis_json) if first.forecast_basis_json else None
+		except (TypeError, ValueError):
+			stored = None
+		if stored:
+			# the comparison with the customer document's own average, as it was
+			# worked out when the forecast was created
+			basis["method_weekly"] = stored.get("method_weekly")
+			basis["document_weekly"] = stored.get("document_weekly")
+			basis["document"] = stored.get("document")
+			basis["auto_switched"] = bool(stored.get("auto_switched"))
+			base = stored.get("base_method")
+			basis["base_method_label"] = fe.METHOD_LABELS.get(base) or ""
+
+		own = frappe.get_all(
+			"Customer Schedule Item",
+			filters={"parent": schedule, "item_code": item_code, "auto_forecast": 0},
+			fields=["delivery_date", "quantity", "demand_type"],
+		)
+		own = [
+			{
+				"delivery_date": str(r.delivery_date),
+				"quantity": flt(r.quantity),
+				"demand_type": r.demand_type,
+				"auto_forecast": 0,
+				"horizon_end": str(first.horizon_end) if first.horizon_end else None,
+			}
+			for r in own
+		]
+
+		def last_four_weeks():
+			value, weeks = fe.last_4_week_avg(own)
+			history = fe._history_for_averaging(own)
+			if not history:
+				return None
+			end = max(d for d in (fe._horizon_end(own), max(getdate(r["delivery_date"]) for r in history)) if d)
+			start = end - timedelta(days=27)
+			return {
+				"weekly_avg": value,
+				"from": str(start),
+				"to": str(end),
+				"weeks": [
+					{
+						"from": str(start + timedelta(days=7 * i)),
+						"to": str(start + timedelta(days=7 * i + 6)),
+						"qty": w,
+					}
+					for i, w in enumerate(weeks)
+				]
+				if len(weeks) == 4
+				else [],
+				"total": round(sum(weeks), 2) if len(weeks) == 4 else None,
+			}
+
+		if method in fe.SHIPPING_MONTHS:
+			months = fe.SHIPPING_MONTHS[method]
+			to_date = getdate(first.creation)
+			from_date = add_months(to_date, -months)
+			params = {"item": item_code, "from_date": str(from_date), "to_date": str(to_date), "customer": first.customer or ""}
+			by_month = frappe.db.sql(
+				f"""
+				SELECT DATE_FORMAT(dn.posting_date, '%%Y-%%m') AS ym, SUM({_DNI_STOCK_QTY}) AS qty
+				FROM `tabDelivery Note Item` dni
+				INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+				WHERE dni.item_code = %(item)s AND dn.docstatus = 1
+				  AND dn.posting_date >= %(from_date)s AND dn.posting_date <= %(to_date)s
+				  AND (%(customer)s = '' OR dn.customer = %(customer)s)
+				GROUP BY ym ORDER BY ym
+				""",
+				params,
+				as_dict=True,
+			)
+			total = round(sum(flt(r.qty) for r in by_month), 2)
+			weeks = months * 13.0 / 3.0
+			basis.update(
+				{
+					"kind": "shipping",
+					"months": months,
+					"from": str(from_date),
+					"to": str(to_date),
+					"total": total,
+					"weeks": round(weeks, 1),
+					"weekly_avg": round(total / weeks, 2) if total > 0 else 0,
+					"by_month": [{"month": r.ym, "qty": round(flt(r.qty), 2)} for r in by_month],
+				}
+			)
+			if total <= 0:
+				# no shipments in the period: the engine used the file's last 4 weeks
+				basis["fallback"] = last_four_weeks()
+		elif method == fe.DOCUMENT_METHOD:
+			basis["kind"] = "document"
+		elif method == "LAST_4_WEEKS_AVG":
+			basis["kind"] = "last4"
+			basis["last4"] = last_four_weeks()
+		else:
+			basis["kind"] = "unknown"
+		out.append(basis)
+	return out
+
+
 def get_demand_breakup(item_code, planning_months=None):
 	"""Where an item's Total Demand on the Material Planning Dashboard comes
 	from: the same rows _schedule_demand_map adds up (latest submitted schedule
@@ -145,6 +419,7 @@ def get_demand_breakup(item_code, planning_months=None):
 			SELECT
 				cs.customer, cs.name AS schedule, cs.release_number, cs.schedule_date,
 				csi.delivery_date, csi.demand_type, csi.quantity, csi.auto_forecast,
+				csi.forecast_method, csi.forecast_source, csi.forecast_basis_json, cs.horizon_end, cs.creation,
 				ROW_NUMBER() OVER (
 					PARTITION BY cs.customer, csi.item_code, csi.delivery_date
 					ORDER BY cs.schedule_date DESC, cs.creation DESC
@@ -189,6 +464,10 @@ def get_demand_breakup(item_code, planning_months=None):
 	out["total"] = sum(r["quantity"] for r in out["rows"])
 	if rows:
 		out["source"] = "Customer Schedule"
+		out["forecast_basis"] = _forecast_basis(item_code, rows)
+		out["monthly"] = _monthly_demand(rows)
+		out["customer_rates"] = _customer_rates(rows)
+		out["monthly_demand"] = round(sum(c["rate"] for c in out["customer_rates"]), 2)
 		return out
 
 	# no schedule rows: the shipping-history fallback (if it applies)
@@ -198,8 +477,8 @@ def get_demand_breakup(item_code, planning_months=None):
 	company = _company_or_none(settings)
 	demand = _shipping_fallback_map(set(), company, months, planning_months).get(item_code, 0.0) if fallback_on else 0.0
 	shipped = frappe.db.sql(
-		"""
-		SELECT SUM(dni.qty) AS q FROM `tabDelivery Note Item` dni
+		f"""
+		SELECT SUM({_DNI_STOCK_QTY}) AS q FROM `tabDelivery Note Item` dni
 		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
 		WHERE dni.item_code = %(item)s AND dn.docstatus = 1
 		  AND dn.posting_date >= %(from)s AND dn.posting_date <= %(today)s
@@ -239,7 +518,7 @@ def _shipping_fallback_map(covered_items, company, months, planning_months):
 
 	rows = frappe.db.sql(
 		f"""
-		SELECT dni.item_code, SUM(dni.qty) AS shipped_qty
+		SELECT dni.item_code, SUM({_DNI_STOCK_QTY}) AS shipped_qty
 		FROM `tabDelivery Note Item` dni
 		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
 		WHERE dn.docstatus = 1
@@ -297,7 +576,7 @@ def _open_po_map(items, company):
 
 	rows = frappe.db.sql(
 		f"""
-		SELECT poi.item_code, SUM(poi.qty - IFNULL(poi.received_qty, 0)) AS open_qty
+		SELECT poi.item_code, SUM({_POI_OPEN_STOCK_QTY}) AS open_qty
 		FROM `tabPurchase Order Item` poi
 		INNER JOIN `tabPurchase Order` po ON po.name = poi.parent
 		WHERE po.docstatus = 1
@@ -333,7 +612,7 @@ def _other_open_mr_map(items, company, exclude_name=None):
 
 	rows = frappe.db.sql(
 		f"""
-		SELECT mri.item_code, SUM(mri.qty - IFNULL(mri.ordered_qty, 0)) AS open_qty
+		SELECT mri.item_code, SUM({_MRI_OPEN_STOCK_QTY}) AS open_qty
 		FROM `tabMaterial Request Item` mri
 		INNER JOIN `tabMaterial Request` mr ON mr.name = mri.parent
 		WHERE {where_sql}
@@ -472,7 +751,8 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 	company = _company_or_none(settings)
 	cover_limit = safety.max_cover_months()
 
-	schedule_demand = _schedule_demand_map(start_date, end_date)
+	profiles = _demand_profiles(start_date, end_date, today_date, planning_months)
+	schedule_demand = {item: p["total"] for item, p in profiles.items()}
 
 	fallback_demand = {}
 	fallback_on = settings.enable_shipping_fallback_forecast
@@ -507,10 +787,10 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 	pool_items_map = {}
 	if pool_name:
 		pool_rows = frappe.get_all(
-			"Material Request Item", filters={"parent": pool_name}, fields=["item_code", "qty"]
+			"Material Request Item", filters={"parent": pool_name}, fields=["item_code", "qty", "stock_qty"]
 		)
 		for r in pool_rows:
-			pool_items_map[r.item_code] = flt(r.qty)
+			pool_items_map[r.item_code] = flt(r.stock_qty) or flt(r.qty)
 
 	rows = []
 	for item_code in sorted(items_in_scope):
@@ -551,9 +831,18 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 
 		# Months of cover: how many months of (average) demand the stock would
 		# last once this order has arrived. Over the limit => red + approval.
-		monthly_demand = demand / planning_months if planning_months else 0.0
-		cover_now = safety.cover_months(available, 0, monthly_demand)
-		cover_after = safety.cover_months(available, order_qty, monthly_demand)
+		# Week by week: the stock (plus this order) is used up against each
+		# month's demand in turn. Monthly demand shown is the sum of every
+		# customer's own monthly rate; an item with no schedule is flat.
+		known = profiles.get(item_code) if source_map.get(item_code) == "Customer Schedule" else None
+		if known:
+			monthly_demand, profile = known["monthly"], known["profile"]
+		else:
+			monthly_demand = demand / planning_months if planning_months else 0.0
+			weeks = _week_count(today_date, planning_months)
+			profile = safety.make_profile([monthly_demand * 7.0 / DAYS_PER_MONTH] * weeks, monthly_demand)
+		cover_now = safety.cover_from_profile(available, 0, profile)
+		cover_after = safety.cover_from_profile(available, order_qty, profile)
 		cover_flag = bool(
 			cover_limit > 0 and order_qty > 0.01 and cover_after is not None and cover_after > cover_limit + 0.05
 		)
@@ -575,6 +864,7 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 				"order_qty": order_qty,
 				"moq_extra": max(order_qty - shortfall, 0.0),
 				"monthly_demand": monthly_demand,
+				"demand_profile": profile,
 				"cover_now": cover_now,
 				"cover_after": cover_after,
 				"cover_flag": cover_flag,
@@ -598,10 +888,21 @@ def compute_planning_snapshot(planning_months=None, lead_time_months=None, wareh
 	}
 
 
+def _set_stock_uom(row, item_code, qty):
+	"""An existing live-MR line is moved to the item's stock UOM, so its qty
+	(always planned in stock UOM) means exactly what the line says."""
+	uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
+	row.uom = uom
+	row.stock_uom = uom
+	row.conversion_factor = 1
+	row.stock_qty = qty
+
+
 def _set_cover_fields(row, info):
 	row.custom_sp_available_qty = info["available_qty"]
 	row.custom_sp_monthly_demand = round(info["monthly_demand"], 2)
 	row.custom_sp_cover_months = info["cover_after"]
+	row.custom_sp_demand_buckets = json.dumps(info["demand_profile"])
 
 
 def _line_description(info, planning_months, lead_time_months):
@@ -622,7 +923,10 @@ def _line_description(info, planning_months, lead_time_months):
 			f"(+{info['moq_extra']:,.0f} above shortfall)"
 		)
 	if info.get("cover_after") is not None:
-		text += f". Months of cover after order: {info['cover_after']:,.1f} (monthly demand {info['monthly_demand']:,.0f})"
+		text += (
+			f". Months of cover after order: {info['cover_after']:,.1f}, counted week by week "
+			f"(monthly demand {info['monthly_demand']:,.0f})"
+		)
 		if info.get("cover_flag"):
 			text += f" - ABOVE LIMIT, approval needed"
 	return text
@@ -685,16 +989,14 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 				row.custom_sp_demand_source = info["demand_source"]
 				changed = True
 			row.description = desc
+			_set_stock_uom(row, item_code, qty)
 			_set_cover_fields(row, info)
 			if changed:
 				updated.append(item_code)
 		else:
 			item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
-			uom = (
-				frappe.db.get_value("Item", item_code, "purchase_uom")
-				or frappe.db.get_value("Item", item_code, "stock_uom")
-				or "Nos"
-			)
+			# the planned qty is in stock UOM (Nos): the line is raised in stock UOM too
+			uom = frappe.db.get_value("Item", item_code, "stock_uom") or "Nos"
 			pool.append(
 				"items",
 				{
@@ -703,6 +1005,8 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 					"qty": qty,
 					"uom": uom,
 					"stock_uom": uom,
+					"conversion_factor": 1,
+					"stock_qty": qty,
 					"warehouse": warehouse,
 					"schedule_date": req_date,
 					"description": desc,
@@ -710,6 +1014,7 @@ def reconcile_material_requests(planning_months=None, lead_time_months=None, war
 					"custom_sp_available_qty": info["available_qty"],
 					"custom_sp_monthly_demand": round(info["monthly_demand"], 2),
 					"custom_sp_cover_months": info["cover_after"],
+					"custom_sp_demand_buckets": json.dumps(info["demand_profile"]),
 				},
 			)
 			created.append(item_code)

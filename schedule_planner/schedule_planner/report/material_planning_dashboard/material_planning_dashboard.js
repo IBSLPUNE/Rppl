@@ -74,6 +74,165 @@ frappe.query_reports["Material Planning Dashboard"] = {
 };
 
 
+// dates are always shown as 02-Nov-2026 (never 11/02 or 02/11) so nobody has to guess day vs month
+function sp_rep_date(x) {
+	return x ? moment(x).format("DD-MMM-YYYY") : "";
+}
+function sp_rep_month(m) {
+	return moment(m + "-01").format("MMM-YYYY");
+}
+
+// "How was the auto forecast worked out?" - method, period, base total and the
+// weekly average, step by step, for the client to follow.
+function sp_basis_html(d) {
+	const esc = frappe.utils.escape_html;
+	const fmt = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+	const dt = sp_rep_date;
+	const bases = d.forecast_basis || [];
+	if (!bases.length) return "";
+
+	const cell = "padding:3px 10px;border-bottom:1px solid var(--border-color,#e2e6e9)";
+	const blocks = bases.map(function (b) {
+		let steps = "";
+		if (b.kind === "shipping") {
+			steps = `
+				<div>${__("Period")}: <b>${__("last {0} months", [b.months])}</b> (${dt(b.from)} &rarr; ${dt(b.to)}, ${__("up to the day the schedule was created")})</div>
+				<div>${__("Total shipped in this period (Delivery Notes of this customer, Nos)")}: <b>${fmt(b.total)}</b></div>
+				<div>${__("Weeks in the period")}: ${b.months} &times; 13 &divide; 3 = <b>${fmt(b.weeks)}</b></div>
+				<div>${__("Weekly average")}: ${fmt(b.total)} &divide; ${fmt(b.weeks)} = <b>${fmt(b.weekly_avg)}</b></div>`;
+			if (b.by_month && b.by_month.length) {
+				steps += `<div style="margin-top:6px;color:var(--text-muted)">${__("Shipped month by month")}: ` +
+					b.by_month.map((m) => `${esc(sp_rep_month(m.month))}: <b>${fmt(m.qty)}</b>`).join(" &nbsp;|&nbsp; ") + `</div>`;
+			}
+			if (b.total <= 0 && b.fallback) {
+				steps += `<div style="margin-top:6px;color:var(--orange-600,#c07a1e)">${__("No shipments in this period, so the customer file's last 4 weeks were used instead:")}
+					${fmt(b.fallback.total)} &divide; 4 = <b>${fmt(b.fallback.weekly_avg)}</b></div>`;
+			}
+		} else if (b.kind === "last4" && b.last4) {
+			const l = b.last4;
+			steps = `
+				<div>${__("Period")}: <b>${__("last 4 weeks of the customer's file")}</b> (${dt(l.from)} &rarr; ${dt(l.to)})</div>`;
+			if (l.weeks && l.weeks.length) {
+				steps += `<table style="margin:4px 0;font-size:12px"><tr>${l.weeks
+					.map((w) => `<td style="${cell}">${dt(w.from)} &rarr; ${dt(w.to)}</td>`).join("")}<td style="${cell};font-weight:600">${__("Total")}</td></tr>
+					<tr>${l.weeks.map((w) => `<td style="${cell};text-align:right">${fmt(w.qty)}</td>`).join("")}<td style="${cell};text-align:right;font-weight:600">${fmt(l.total)}</td></tr></table>
+					<div style="color:var(--text-muted)">${__("A week with no quantity counts as 0.")}</div>`;
+			}
+			steps += `<div>${__("Weekly average")}: ${fmt(l.total)} &divide; 4 = <b>${fmt(l.weekly_avg)}</b></div>`;
+		} else if (b.kind === "document") {
+			steps = `<div>${__("This item's weekly qty is the customer document's own average (worked out below).")}</div>`;
+		} else {
+			steps = `<div style="color:var(--text-muted)">${__("The method details were not recorded on this schedule.")}</div>`;
+		}
+
+		let compare = "";
+		if (b.document && b.document_weekly !== undefined && b.document_weekly !== null) {
+			const doc = b.document;
+			const used_doc = b.source === "Document Average";
+			const base = b.base_method_label || b.method_label;
+			let verdict;
+			if (b.auto_switched) {
+				verdict = __("The document average ({0}) was higher than {1} ({2}), so this item was switched to the method <b>Average of Customer Document</b>.", [fmt(b.document_weekly), esc(base), fmt(b.method_weekly)]);
+			} else if (used_doc) {
+				verdict = __("Method <b>Average of Customer Document</b> was chosen for this item, so the document average is used.");
+			} else {
+				verdict = __("The method chosen for this item ({0}) is used; the document average ({1}) was not higher than it, or the method was picked by the user.", [fmt(b.method_weekly), fmt(b.document_weekly)]);
+			}
+			compare = `<div style="margin-top:6px;padding:6px 8px;background:var(--fg-color,#fff);border:1px solid var(--border-color,#e2e6e9);border-radius:4px">
+				<div style="font-weight:600">${__("Customer document's own average")}</div>
+				<div>${__("Period")}: ${dt(doc.from)} &rarr; ${dt(doc.to)} (<b>${fmt(doc.weeks)}</b> ${__("weeks")}) &nbsp;|&nbsp; ${__("Total quantity in the document for this item")}: <b>${fmt(doc.total)}</b></div>
+				<div>${__("Document weekly average")}: ${fmt(doc.total)} &divide; ${fmt(doc.weeks)} = <b>${fmt(b.document_weekly)}</b></div>
+				<div style="margin-top:4px">${verdict}</div>
+			</div>`;
+		} else if (b.source === "Document Average") {
+			compare = `<div style="margin-top:6px"><b>${__("The customer document's own average was used for this item.")}</b></div>`;
+		}
+
+		const computed = b.source === "Document Average" ? null : b.kind === "shipping" ? b.weekly_avg : b.last4 ? b.last4.weekly_avg : null;
+		const moved = computed !== null && computed !== undefined && b.total !== 0 && Math.abs(computed - b.weekly_used) > Math.max(1, b.weekly_used * 0.01);
+		const note = moved
+			? `<div style="margin-top:6px;color:var(--orange-600,#c07a1e)">${__("Shipment records have changed since this schedule was created, so today's figure ({0}) differs slightly from the weekly qty that was used.", [fmt(computed)])}</div>`
+			: "";
+
+		const auto_months = {};
+		(d.rows || []).forEach((x) => {
+			if (x.auto_forecast && x.schedule === b.schedule) {
+				const k = x.delivery_date.slice(0, 7);
+				auto_months[k] = (auto_months[k] || 0) + x.quantity;
+			}
+		});
+		const auto_line = Object.keys(auto_months).length
+			? `<div style="margin-top:4px;color:var(--text-muted)">${__("Auto forecast month by month")}: ` +
+				Object.keys(auto_months).sort().map((k) => `${esc(sp_rep_month(k))}: <b>${fmt(auto_months[k])}</b>`).join(" &nbsp;|&nbsp; ") + `</div>`
+			: "";
+
+		return `<div style="padding:10px 12px;margin-bottom:8px;background:var(--bg-light-gray,#f7f7f7);border-radius:6px;font-size:12.5px;line-height:1.6">
+			<div>${__("Forecast method")}: <b>${esc(b.method_label)}</b> &nbsp;|&nbsp; ${__("Customer")}: <b>${esc(b.customer || "")}</b> &nbsp;|&nbsp; ${__("Schedule")}: <a href="/app/customer-schedule/${encodeURIComponent(b.schedule)}" target="_blank">${esc(b.schedule)}</a></div>
+			${steps}${note}${compare}
+			<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border-color,#d1d8dd)">
+				${__("Weekly forecast qty used")}: <b>${fmt(b.weekly_used)}</b> &times; ${b.auto_weeks} ${__("weeks")}
+				(${dt(b.auto_from)} &rarr; ${dt(b.auto_to)}) = <b>${fmt(b.auto_total)}</b> ${__("auto forecast in this window")}
+				${auto_line}
+			</div>
+		</div>`;
+	});
+	return `<div style="margin:0 0 10px"><div style="font-weight:600;margin-bottom:6px">${__("How the auto forecast was worked out")}</div>${blocks.join("")}</div>`;
+}
+
+// Monthly demand = the sum of each customer's own monthly rate
+function sp_rates_html(d) {
+	const rates = d.customer_rates || [];
+	if (!rates.length) return "";
+	const esc = frappe.utils.escape_html;
+	const fmt = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+	const cell = "padding:3px 10px;border-bottom:1px solid var(--border-color,#e2e6e9)";
+	const body = rates
+		.map(
+			(c) => `<tr><td style="${cell}">${esc(c.customer || "")}</td>
+				<td style="${cell}">${sp_rep_date(c.from)} &rarr; ${sp_rep_date(c.to)}</td>
+				<td style="${cell};text-align:right">${fmt(c.total)}</td>
+				<td style="${cell};text-align:right">${fmt(c.months)}</td>
+				<td style="${cell};text-align:right;font-weight:600">${fmt(c.rate)}</td></tr>`
+		)
+		.join("");
+	return `<div style="margin:0 0 10px;font-size:12.5px">
+		<div style="font-weight:600;margin-bottom:6px">${__("Monthly demand = sum of each customer's own monthly rate")}</div>
+		<table class="table table-condensed" style="font-size:12px;margin-bottom:4px">
+			<thead><tr><th>${__("Customer")}</th><th>${__("Demand from - to")}</th><th style="text-align:right">${__("Quantity")}</th><th style="text-align:right">${__("Months")}</th><th style="text-align:right">${__("Per month")}</th></tr></thead>
+			<tbody>${body}</tbody>
+			<tfoot><tr style="font-weight:600"><td colspan="4">${__("Monthly demand (total of all customers)")}</td><td style="text-align:right">${fmt(d.monthly_demand)}</td></tr></tfoot>
+		</table>
+		<div style="color:var(--text-muted)">${__("Months of cover is worked out week by week: the available stock is used up against each week's demand, so a customer whose schedule is shorter stops counting once it ends.")}</div>
+	</div>`;
+}
+
+// Demand month by month: customer Firm / Forecast and the auto forecast, side by side
+function sp_monthly_html(d) {
+	const fmt = (n) => (Number(n || 0) ? Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-");
+	const months = d.monthly || [];
+	if (!months.length) return "";
+	const tot = { firm: 0, forecast: 0, auto: 0, total: 0 };
+	const rows = months
+		.map(function (m) {
+			["firm", "forecast", "auto", "total"].forEach((k) => (tot[k] += m[k]));
+			return `<tr><td>${frappe.utils.escape_html(sp_rep_month(m.month))}</td>
+				<td style="text-align:right">${fmt(m.firm)}</td><td style="text-align:right">${fmt(m.forecast)}</td>
+				<td style="text-align:right">${fmt(m.auto)}</td><td style="text-align:right;font-weight:600">${fmt(m.total)}</td></tr>`;
+		})
+		.join("");
+	return `<div style="margin:0 0 10px"><div style="font-weight:600;margin-bottom:6px">${__("Demand month by month")}</div>
+		<div style="max-height:240px;overflow:auto;border:1px solid var(--border-color,#d1d8dd);border-radius:6px">
+		<table class="table table-condensed" style="margin:0;font-size:12px">
+			<thead style="position:sticky;top:0;background:var(--fg-color,#fff)"><tr><th>${__("Month")}</th>
+				<th style="text-align:right">${__("Customer Firm")}</th><th style="text-align:right">${__("Customer Forecast")}</th>
+				<th style="text-align:right">${__("Auto Forecast")}</th><th style="text-align:right">${__("Total")}</th></tr></thead>
+			<tbody>${rows}</tbody>
+			<tfoot><tr style="font-weight:600"><td>${__("Total")}</td><td style="text-align:right">${fmt(tot.firm)}</td>
+				<td style="text-align:right">${fmt(tot.forecast)}</td><td style="text-align:right">${fmt(tot.auto)}</td>
+				<td style="text-align:right">${fmt(tot.total)}</td></tr></tfoot>
+		</table></div></div>`;
+}
+
 function sp_show_demand_breakup(item_code, planning_months) {
 	frappe.call({
 		method: "schedule_planner.api.get_demand_breakup",
@@ -103,7 +262,7 @@ function sp_show_demand_breakup(item_code, planning_months) {
 						const overdue = x.delivery_date < d.today;
 						const kind = x.auto_forecast ? __("Auto forecast") : x.demand_type;
 						return `<tr>
-							<td>${esc(x.delivery_date)}${overdue ? ` <span style="color:var(--orange-600,#c07a1e)">(${__("overdue")})</span>` : ""}</td>
+							<td>${esc(sp_rep_date(x.delivery_date))}${overdue ? ` <span style="color:var(--orange-600,#c07a1e)">(${__("overdue")})</span>` : ""}</td>
 							<td>${esc(x.customer)}</td>
 							<td><a href="/app/customer-schedule/${encodeURIComponent(x.schedule)}" target="_blank">${esc(x.schedule)}</a></td>
 							<td>${esc(x.release_number || "")}</td>
@@ -115,6 +274,9 @@ function sp_show_demand_breakup(item_code, planning_months) {
 				body = `
 					<div style="margin-bottom:8px">${__("By customer")}: ${chips(by_customer)}</div>
 					<div style="margin-bottom:10px">${__("By type")}: ${chips(by_type)}</div>
+					${sp_basis_html(d)}
+					${sp_rates_html(d)}
+					${sp_monthly_html(d)}
 					<div style="max-height:420px;overflow:auto;border:1px solid var(--border-color,#d1d8dd);border-radius:6px">
 					<table class="table table-condensed" style="margin:0;font-size:12px">
 						<thead style="position:sticky;top:0;background:var(--fg-color,#fff)"><tr>
@@ -145,7 +307,7 @@ function sp_show_demand_breakup(item_code, planning_months) {
 						fieldtype: "HTML",
 						fieldname: "body",
 						options: `<div style="margin-bottom:10px;font-size:12px;color:var(--text-muted)">
-							${__("Window")}: ${esc(d.start_date)} &rarr; ${esc(d.end_date)} (${d.planning_months}M, ${d.grace_days}d ${__("overdue grace")})
+							${__("Window")}: ${esc(sp_rep_date(d.start_date))} &rarr; ${esc(sp_rep_date(d.end_date))} (${d.planning_months}M, ${d.grace_days}d ${__("overdue grace")})
 							&nbsp;|&nbsp; ${__("Source")}: <b>${esc(d.source)}</b> &nbsp;|&nbsp; ${__("Total")}: <b>${fmt(d.total)}</b>
 						</div>${body}`,
 					},

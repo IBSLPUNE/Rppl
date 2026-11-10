@@ -51,6 +51,11 @@ frappe.ui.form.on("Customer Schedule", {
 	},
 });
 
+// Dates in our dialogs are always shown as 02-Nov-2026 so day and month can never be confused.
+function sp_cs_date(x) {
+	return x ? moment(x).format("DD-MMM-YYYY") : "";
+}
+
 // ============================================================================
 // UPLOAD + ANALYSE (PDF / Excel / CSV - format is auto-detected per customer)
 // ============================================================================
@@ -103,7 +108,7 @@ function _show_create_dialog(frm, file_url, analysis) {
 						<b>${__("File Analysis")}</b><br>
 						${__("Release")}: <b>${frappe.utils.escape_html(analysis.header.release_number || "-")}</b>
 						&nbsp;|&nbsp; ${__("Data available")}: <b>${available_months}</b> ${__("month(s)")}
-						&nbsp;|&nbsp; ${frappe.datetime.str_to_user(analysis.from_date)} &rarr; ${frappe.datetime.str_to_user(analysis.to_date)}
+						&nbsp;|&nbsp; ${sp_cs_date(analysis.from_date)} &rarr; ${sp_cs_date(analysis.to_date)}
 						${mapping_banner}
 					</div>
 				`,
@@ -120,9 +125,10 @@ function _show_create_dialog(frm, file_url, analysis) {
 				fieldtype: "Int",
 				default: default_target,
 				reqd: 1,
-				description: __("File contains {0} month(s). Consider your parts lead time when choosing this.", [
-					available_months,
-				]),
+				description: __(
+					"Counted from each item's first date in the sheet (zero or non-zero qty): sheet starts 04-Jan, 6 months = up to 04-Jul. Auto-forecast starts the week after the item's last non-zero quantity. File contains {0} month(s).",
+					[available_months]
+				),
 			},
 			{ fieldtype: "Column Break" },
 			{
@@ -134,6 +140,7 @@ function _show_create_dialog(frm, file_url, analysis) {
 					{ label: "Average Weekly Shipment - Last 3 Months", value: "LAST_3_MONTHS_SHIPPING_AVG" },
 					{ label: "Average Weekly Shipment - Last 6 Months", value: "LAST_6_MONTHS_SHIPPING_AVG" },
 					{ label: "Average Weekly Shipment - Last 9 Months", value: "LAST_9_MONTHS_SHIPPING_AVG" },
+					{ label: "Average of Customer Document", value: "DOCUMENT_AVG" },
 				],
 				default: default_method,
 				reqd: 1,
@@ -518,7 +525,7 @@ function _show_extend_dialog(frm) {
 						options: `
 							<div style="padding:10px 12px;background:var(--bg-light-gray,#f8f9fa);border-radius:6px;margin-bottom:12px;font-size:12px">
 								${__("Current coverage")}: <b>${info.available_months}</b> ${__("month(s)")}
-								&nbsp;|&nbsp; ${frappe.datetime.str_to_user(info.from_date)} &rarr; ${frappe.datetime.str_to_user(info.to_date)}
+								&nbsp;|&nbsp; ${sp_cs_date(info.from_date)} &rarr; ${sp_cs_date(info.to_date)}
 							</div>
 						`,
 					},
@@ -530,6 +537,7 @@ function _show_extend_dialog(frm) {
 						label: __("Total months required (file + auto)"),
 						default: info.available_months + 3,
 						reqd: 1,
+						description: __("Counted from each item's first date in the sheet (zero or non-zero qty); auto-forecast starts the week after the item's last non-zero quantity."),
 					},
 					{ fieldtype: "Column Break" },
 					{
@@ -541,6 +549,7 @@ function _show_extend_dialog(frm) {
 							{ label: "Average Weekly Shipment - Last 3 Months", value: "LAST_3_MONTHS_SHIPPING_AVG" },
 							{ label: "Average Weekly Shipment - Last 6 Months", value: "LAST_6_MONTHS_SHIPPING_AVG" },
 							{ label: "Average Weekly Shipment - Last 9 Months", value: "LAST_9_MONTHS_SHIPPING_AVG" },
+							{ label: "Average of Customer Document", value: "DOCUMENT_AVG" },
 						],
 						default: default_method,
 						reqd: 1,
@@ -703,7 +712,7 @@ function _show_revision_dialog(frm) {
 					const color = row.change > 0 ? "var(--text-success,#1a6b3c)" : "var(--text-danger,#a93226)";
 					return `<tr>
 						<td>${frappe.utils.escape_html(row.item_code)}</td>
-						<td>${frappe.datetime.str_to_user(row.delivery_date)}</td>
+						<td>${sp_cs_date(row.delivery_date)}</td>
 						<td>${row.demand_type}</td>
 						<td style="text-align:right">${row.old_qty || "-"}</td>
 						<td style="text-align:right">${row.new_qty || "-"}</td>
@@ -750,13 +759,14 @@ const SP_METHOD_CHOICES = [
 	{ value: "LAST_3_MONTHS_SHIPPING_AVG", label: "Shipping 3 Mo" },
 	{ value: "LAST_6_MONTHS_SHIPPING_AVG", label: "Shipping 6 Mo" },
 	{ value: "LAST_9_MONTHS_SHIPPING_AVG", label: "Shipping 9 Mo" },
+	{ value: "DOCUMENT_AVG", label: "Document Avg" },
 ];
 
-function _method_select_html(item_code, selected) {
+function _method_select_html(item_code, selected, explicit) {
 	const options = SP_METHOD_CHOICES.map(
 		(m) => `<option value="${m.value}"${m.value === selected ? " selected" : ""}>${__(m.label)}</option>`
 	).join("");
-	return `<select class="sp-item-method form-control input-xs" data-item="${frappe.utils.escape_html(item_code)}" style="height:24px;padding:0 4px;font-size:12px;min-width:110px">${options}</select>`;
+	return `<select class="sp-item-method form-control input-xs" data-item="${frappe.utils.escape_html(item_code)}"${explicit ? ' data-user="1"' : ""} style="height:24px;padding:0 4px;font-size:12px;min-width:110px">${options}</select>`;
 }
 
 function _item_table_html(item_details, default_method) {
@@ -766,15 +776,22 @@ function _item_table_html(item_details, default_method) {
 				<td style="width:36px;text-align:center">
 					<input type="checkbox" class="sp-item-cb" data-item="${frappe.utils.escape_html(item.item_code)}" checked style="width:15px;height:15px;cursor:pointer">
 				</td>
-				<td style="font-weight:500;font-size:12px">${frappe.utils.escape_html(item.item_code)}</td>
-				<td style="font-size:12px;color:var(--text-muted)">${frappe.utils.escape_html(item.item_name || "")}</td>
+				<td style="font-weight:500;font-size:12px"><div style="max-width:78px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${frappe.utils.escape_html(item.item_code)}">${frappe.utils.escape_html(item.item_code)}</div></td>
+				<td style="font-size:12px;color:var(--text-muted)"><div style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${frappe.utils.escape_html(item.item_name || "")}">${frappe.utils.escape_html(item.item_name || "")}</div></td>
 				<td style="text-align:center;font-size:12px">
 					<span style="background:var(--bg-blue,#eaf4ff);color:var(--text-accent,#2490ef);padding:2px 8px;border-radius:4px;font-weight:500">${item.months} mo</span>
 				</td>
-				<td style="font-size:12px;color:var(--text-muted)">${frappe.datetime.str_to_user(item.from_date)} &rarr; ${frappe.datetime.str_to_user(item.to_date)}</td>
+				<td style="font-size:12px;color:var(--text-muted)">${sp_cs_date(item.from_date)} &rarr; ${sp_cs_date(item.to_date)}</td>
 				<td style="text-align:right;font-size:12px">${Number(item.total_qty || 0).toLocaleString()}</td>
-				<td style="font-size:12px">${_method_select_html(item.item_code, item.forecast_method || default_method)}</td>
+				<td style="font-size:12px">${_method_select_html(
+					item.item_code,
+					item.forecast_method || default_method,
+					// a method the customer already had picked for this item is kept; the
+					// default and a document-average switch are worked out afresh
+					!!item.forecast_method && item.forecast_method !== default_method && item.forecast_method !== "DOCUMENT_AVG"
+				)}</td>
 				<td class="sp-auto-qty" data-item="${frappe.utils.escape_html(item.item_code)}" style="text-align:right;font-size:12px;font-weight:500;color:var(--text-muted)">&hellip;</td>
+				<td class="sp-auto-doc" data-item="${frappe.utils.escape_html(item.item_code)}" style="text-align:right;font-size:12px;font-weight:500;color:var(--text-muted)">&hellip;</td>
 			</tr>`;
 		})
 		.join("");
@@ -791,7 +808,7 @@ function _item_table_html(item_details, default_method) {
 				<thead style="position:sticky;top:0;background:var(--fg-color,#fff);z-index:1">
 					<tr>
 						<th style="width:36px;text-align:center"><input type="checkbox" class="sp-cb-header" checked style="width:15px;height:15px;cursor:pointer"></th>
-						<th>${__("Item")}</th><th>${__("Name")}</th><th style="text-align:center">${__("Months")}</th><th>${__("Range")}</th><th style="text-align:right">${__("Total Qty")}</th><th>${__("Forecast Method")}</th><th style="text-align:right">${__("Auto Forecast Qty")}</th>
+						<th>${__("Item")}</th><th>${__("Name")}</th><th style="text-align:center">${__("Months")}</th><th>${__("Range")}</th><th style="text-align:right">${__("Total Qty")}</th><th>${__("Forecast Method")}</th><th style="text-align:right">${__("Auto Forecast Qty")}<div style="font-weight:400;font-size:10.5px;color:var(--text-muted)">${__("by method")}</div></th><th style="text-align:right">${__("Auto Forecast by Document")}<div style="font-weight:400;font-size:10.5px;color:var(--text-muted)">${__("customer's own average")}</div></th>
 					</tr>
 				</thead>
 				<tbody>${rows_html}</tbody>
@@ -800,7 +817,12 @@ function _item_table_html(item_details, default_method) {
 						<td></td><td colspan="4">${__("Total")}</td>
 						<td style="text-align:right" class="sp-total-qty">${Number((item_details || []).reduce((a, i) => a + Number(i.total_qty || 0), 0)).toLocaleString()}</td>
 						<td></td>
-						<td style="text-align:right" class="sp-total-auto-qty">&hellip;</td>
+						<td style="text-align:right" class="sp-total-auto-method">&hellip;</td>
+						<td style="text-align:right" class="sp-total-auto-doc">&hellip;</td>
+					</tr>
+					<tr style="font-weight:600">
+						<td></td><td colspan="6" style="text-align:right;color:var(--text-muted);font-weight:400">${__("Auto forecast that will be created (the higher of the two for each item)")}</td>
+						<td colspan="2" style="text-align:right" class="sp-total-auto-qty">&hellip;</td>
 					</tr>
 				</tfoot>
 			</table>
@@ -811,29 +833,67 @@ function _item_table_html(item_details, default_method) {
 // Fill the "Auto Forecast Qty" column from a preview result. Items that are
 // unticked (or get no forecast) show a dash.
 function _fill_auto_qty(dialog, preview) {
+	_sync_item_methods(dialog, preview);
 	const by_item = {};
 	const flagged = [];
 	let total = 0;
+	let total_method = 0;
+	let total_doc = 0;
 	let multiplier = 2;
+	const fmt = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 	(preview || []).forEach(function (p) {
 		by_item[p.item_code] = p;
 		total += Number(p.auto_qty || 0);
+		total_method += Number(p.auto_qty_method || 0);
+		total_doc += Number(p.auto_qty_document || 0);
 		if (p.limit_multiplier) multiplier = p.limit_multiplier;
 		if (p.forecast_flag) flagged.push(p);
 	});
+
+	// the figure that will really be created is shown bold (green tick); the other one is muted
+	const paint = function ($cell, qty, is_used, p) {
+		let html = qty ? fmt(qty) : "-";
+		let color = "var(--text-muted)";
+		let weight = 400;
+		if (is_used && qty) {
+			color = "var(--text-color)";
+			weight = 600;
+			html = "&#10003; " + html;
+			if (p && p.forecast_flag) {
+				const ratio = p.forecast_ratio === null || p.forecast_ratio === undefined ? __("no history") : Number(p.forecast_ratio).toFixed(1) + "x";
+				html = "&#9888; " + html + ` <span style="font-weight:400">(${ratio})</span>`;
+				color = "var(--red-600,#c53030)";
+			} else {
+				color = "var(--green-600,#2f855a)";
+			}
+		}
+		$cell.css({ color: color, "font-weight": weight }).html(html);
+	};
+
 	dialog.$wrapper.find(".sp-auto-qty").each(function () {
 		const p = by_item[String($(this).attr("data-item"))];
-		const qty = p ? Number(p.auto_qty || 0) : 0;
-		let html = qty ? qty.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-";
-		let color = qty ? "var(--text-color)" : "var(--text-muted)";
-		if (p && p.forecast_flag) {
-			const ratio = p.forecast_ratio === null || p.forecast_ratio === undefined ? __("no history") : Number(p.forecast_ratio).toFixed(1) + "x";
-			html = "&#9888; " + html + ` <span style="font-weight:400">(${ratio})</span>`;
-			color = "var(--red-600,#c53030)";
-		}
-		$(this).css("color", color).html(html);
+		const used_method = !!p && Number(p.auto_qty || 0) > 0 && p.used !== "Document Average";
+		paint($(this), p ? Number(p.auto_qty_method || 0) : 0, used_method, p);
+		if (p) $(this).attr("title", __("Forecast method: {0} per week", [fmt(p.method_value)]));
 	});
-	dialog.$wrapper.find(".sp-total-auto-qty").text(total.toLocaleString(undefined, { maximumFractionDigits: 2 }));
+	dialog.$wrapper.find(".sp-auto-doc").each(function () {
+		const p = by_item[String($(this).attr("data-item"))];
+		const used_doc = !!p && Number(p.auto_qty || 0) > 0 && p.used === "Document Average";
+		paint($(this), p ? Number(p.auto_qty_document || 0) : 0, used_doc, p);
+		if (p && p.document_enabled === false) {
+			$(this).attr("title", __("Document comparison is switched off in Schedule Planning Settings"));
+		} else if (p && p.document_from) {
+			$(this).attr(
+				"title",
+				__("Customer document: {0} per week = {1} qty over {2} weeks ({3} to {4})", [
+					fmt(p.document_value), fmt(p.document_total), fmt(p.document_weeks), sp_cs_date(p.document_from), sp_cs_date(p.document_to),
+				])
+			);
+		}
+	});
+	dialog.$wrapper.find(".sp-total-auto-method").text(fmt(total_method));
+	dialog.$wrapper.find(".sp-total-auto-doc").text(fmt(total_doc));
+	dialog.$wrapper.find(".sp-total-auto-qty").text(fmt(total));
 
 	const $banner = dialog.$wrapper.find(".sp-limit-banner");
 	if (flagged.length) {
@@ -852,7 +912,7 @@ function _fill_auto_qty(dialog, preview) {
 }
 
 function _mark_auto_qty_loading(dialog) {
-	dialog.$wrapper.find(".sp-auto-qty, .sp-total-auto-qty").html("&hellip;");
+	dialog.$wrapper.find(".sp-auto-qty, .sp-auto-doc, .sp-total-auto-qty, .sp-total-auto-method, .sp-total-auto-doc").html("&hellip;");
 }
 
 function _wire_item_table(dialog, on_change) {
@@ -870,6 +930,8 @@ function _wire_item_table(dialog, on_change) {
 			on_change();
 		});
 		$wrapper.on("change", ".sp-item-method", function () {
+			// the user chose this item's method - the system will not switch it
+			$(this).attr("data-user", "1");
 			on_change();
 		});
 		$wrapper.find(".sp-select-all").on("click", function (e) {
@@ -885,18 +947,39 @@ function _wire_item_table(dialog, on_change) {
 	}, 300);
 }
 
-// {item_code: method} from the per-item dropdowns
+// {item_code: method} for the items whose method the USER picked. Items left
+// alone follow the dialog's default - or the document average where that is
+// higher (the server works that out, see _sync_item_methods).
 function _get_item_methods(dialog) {
 	const methods = {};
-	dialog.$wrapper.find(".sp-item-method").each(function () {
+	dialog.$wrapper.find(".sp-item-method[data-user='1']").each(function () {
 		methods[String($(this).attr("data-item"))] = $(this).val();
 	});
 	return methods;
 }
 
-// the dialog-level "Auto Forecast Method" sets every item's dropdown
+// the dialog-level "Auto Forecast Method" sets every item's dropdown (and
+// hands every item back to the system until the user picks one again)
 function _apply_default_method(dialog, method) {
-	dialog.$wrapper.find(".sp-item-method").val(method);
+	dialog.$wrapper.find(".sp-item-method").val(method).removeAttr("data-user");
+}
+
+// show, in each untouched item's dropdown, the method it will really use:
+// "Document Avg" where the customer document's average is higher
+function _sync_item_methods(dialog, preview) {
+	(preview || []).forEach(function (p) {
+		const $sel = dialog.$wrapper.find(".sp-item-method").filter(function () {
+			return String($(this).attr("data-item")) === String(p.item_code);
+		});
+		if ($sel.length && !$sel.attr("data-user") && p.method) {
+			$sel.val(p.method);
+			$sel.attr("title", p.auto_switched ? __("Switched to the customer document's average because it is higher than {0}. Change it if you want another method.", [fmt_weekly(p.method_value)]) : "");
+		}
+	});
+}
+
+function fmt_weekly(n) {
+	return Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function _get_selected_items(dialog) {
@@ -909,19 +992,27 @@ function _get_selected_items(dialog) {
 }
 
 function _method_help_html(method) {
+	if (method === "DOCUMENT_AVG") {
+		return `
+			<div style="padding:12px;background:var(--bg-green,#e9f7ef);border-left:4px solid #2f855a;margin-bottom:12px">
+				<b>${__("Average of Customer Document")}</b> <span style="color:var(--text-muted)">(${__("this choice applies to every item; change it per item in the table")})</span><br><br>
+				${__("Uses the customer's own weekly average for the item: all quantity in the uploaded file for the item divided by the weeks of its period (the period is set in Schedule Planning Settings).")}
+			</div>
+		`;
+	}
 	const months = { LAST_3_MONTHS_SHIPPING_AVG: 3, LAST_6_MONTHS_SHIPPING_AVG: 6, LAST_9_MONTHS_SHIPPING_AVG: 9 }[method];
 	if (months) {
 		const weeks = Math.round((months * 13) / 3);
 		return `
 			<div style="padding:12px;background:var(--bg-orange,#fff7e6);border-left:4px solid #f39c12;margin-bottom:12px">
-				<b>${__("Average Weekly Shipment - Last {0} Months", [months])}</b> <span style="color:var(--text-muted)">(${__("this choice applies to every item; change it per item in the table")})</span><br><br>
+				<b>${__("Average Weekly Shipment - Last {0} Months", [months])}</b> <span style="color:var(--text-muted)">(${__("applies to every item; an item whose customer-document average is higher switches to Document Avg by itself - change any item in the table")})</span><br><br>
 				${__("Uses this item's actual Delivery Note shipments over the last {0} months, divided by {1} weeks (weeks with no shipment count as zero). Falls back to the Last 4 Weeks average only if there is no shipment history yet.", [months, weeks])}
 			</div>
 		`;
 	}
 	return `
 		<div style="padding:12px;background:var(--bg-blue,#eaf4ff);border-left:4px solid #2490ef;margin-bottom:12px">
-			<b>${__("Average of Last 4 Weeks")}</b> <span style="color:var(--text-muted)">(${__("this choice applies to every item; change it per item in the table")})</span><br><br>
+			<b>${__("Average of Last 4 Weeks")}</b> <span style="color:var(--text-muted)">(${__("applies to every item; an item whose customer-document average is higher switches to Document Avg by itself - change any item in the table")})</span><br><br>
 			${__("Takes the last 4 weeks of the file and divides the total by 4. Weeks with no quantity count as zero (e.g. 100, 0, 400, 0 gives 500 / 4 = 125). That value is repeated for every future week until the target month count is reached.")}
 		</div>
 	`;
@@ -938,7 +1029,7 @@ function _render_preview(wrapper, message) {
 			<h5>${__("Predicted Forecast Preview")}</h5>
 			<div style="overflow:auto;max-height:260px">
 				<table class="table table-bordered table-condensed" style="font-size:12px">
-					<thead><tr><th>${__("Item")}</th><th>${__("Method")}</th><th>${__("Predicted Weekly Qty")}</th><th>${__("Sample Basis")}</th></tr></thead>
+					<thead><tr><th>${__("Item")}</th><th>${__("Method")}</th><th>${__("Method Weekly Qty")}</th><th>${__("Document Weekly Avg")}</th><th>${__("Weekly Qty Used")}</th><th>${__("Sample Basis")}</th></tr></thead>
 					<tbody>
 	`;
 	message.forEach(function (row) {
@@ -946,7 +1037,9 @@ function _render_preview(wrapper, message) {
 		html += `<tr>
 			<td><b>${frappe.utils.escape_html(row.item_code)}</b></td>
 			<td>${frappe.utils.escape_html(row.description)}</td>
-			<td><b>${parseFloat(row.predicted_value || 0).toFixed(2)}</b></td>
+			<td>${parseFloat(row.method_value !== undefined ? row.method_value : row.predicted_value || 0).toFixed(2)}</td>
+			<td title="${row.document_from ? sp_cs_date(row.document_from) + " - " + sp_cs_date(row.document_to) + ", " + parseFloat(row.document_weeks || 0).toFixed(1) + " " + __("weeks") : ""}">${row.document_enabled === false ? "-" : parseFloat(row.document_value || 0).toFixed(2)}</td>
+			<td><b>${Number(row.predicted_value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> <span style="color:var(--text-muted)">(${row.used === "Document Average" ? __("document") : __("method")})</span></td>
 			<td>${sample}</td>
 		</tr>`;
 	});
@@ -966,6 +1059,7 @@ function _refresh_preview_from_rows(dialog, rows_json, method, selected_items) {
 			selected_items: JSON.stringify(selected_items),
 			target_months: parseInt(dialog.get_value("target_months")) || null,
 			item_methods: JSON.stringify(_get_item_methods(dialog)),
+			customer: (window.cur_frm && cur_frm.doc && cur_frm.doc.customer) || null,
 		},
 		callback: function (r) {
 			_render_preview(wrapper, r.message);
@@ -1071,7 +1165,7 @@ function _show_presubmit_dialog(frm, report) {
 		html += `<h6>${__("2. What was read from the file")}</h6>
 		<div style="font-size:12px;margin-bottom:8px">
 			${__("Months in file")}: <b>${f.months_parsed || f.months_in_lines}</b>
-			${f.from_date ? ` (${SP_ESC(frappe.datetime.str_to_user(f.from_date))} &rarr; ${SP_ESC(frappe.datetime.str_to_user(f.to_date))})` : ""}
+			${f.from_date ? ` (${SP_ESC(sp_cs_date(f.from_date))} &rarr; ${SP_ESC(sp_cs_date(f.to_date))})` : ""}
 			&nbsp;|&nbsp; ${__("Lines loaded")}: <b>${f.lines_in_schedule}</b>${f.lines_parsed ? ` ${__("of")} ${f.lines_parsed}` : ""}
 			&nbsp;|&nbsp; ${__("Items")}: <b>${f.items}</b>
 			&nbsp;|&nbsp; ${__("Skipped part numbers")}: <b>${rep.skipped.length}</b>

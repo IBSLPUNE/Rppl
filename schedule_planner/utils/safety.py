@@ -17,6 +17,7 @@ the business can tune them without a code change."""
 
 import hashlib
 import json
+import math
 from collections import defaultdict
 
 import frappe
@@ -79,29 +80,31 @@ def _file_weekly(own_rows):
 	return sum(flt(r["quantity"]) for r in own_rows) / weeks
 
 
-def _shipped_weekly(item_code, months=SHIPPING_REFERENCE_MONTHS):
-	"""Average weekly Delivery Note qty over the last `months` months."""
+def _shipped_weekly(item_code, months=SHIPPING_REFERENCE_MONTHS, customer=None):
+	"""Average weekly Delivery Note qty over the last `months` months (this
+	customer's only, when given)."""
 	from_date = add_months(getdate(today()), -months)
 	res = frappe.db.sql(
 		"""
-		SELECT SUM(dni.qty)
+		SELECT SUM(IFNULL(NULLIF(dni.stock_qty, 0), dni.qty * IFNULL(NULLIF(dni.conversion_factor, 0), 1)))
 		FROM `tabDelivery Note Item` dni
 		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
 		WHERE dni.item_code = %(item)s AND dn.docstatus = 1
 		  AND dn.posting_date >= %(from_date)s AND dn.posting_date <= %(today)s
+		  AND (%(customer)s = '' OR dn.customer = %(customer)s)
 		""",
-		{"item": item_code, "from_date": str(from_date), "today": str(getdate(today()))},
+		{"item": item_code, "from_date": str(from_date), "today": str(getdate(today())), "customer": customer or ""},
 	)
 	total = flt(res[0][0]) if res and res[0][0] else 0.0
 	return total / (months * 13.0 / 3.0)
 
 
-def check_item(item_code, own_rows, forecast_weekly, multiplier=None):
+def check_item(item_code, own_rows, forecast_weekly, multiplier=None, customer=None):
 	"""Compare one item's forecast weekly qty with its history (the higher of
 	the file's own weekly average and the last 6 months' shipments)."""
 	multiplier = forecast_limit_multiplier() if multiplier is None else multiplier
 	file_weekly = _file_weekly(own_rows)
-	shipped_weekly = _shipped_weekly(item_code)
+	shipped_weekly = _shipped_weekly(item_code, customer=customer)
 	history = max(file_weekly, shipped_weekly)
 	forecast_weekly = flt(forecast_weekly)
 	flagged = bool(
@@ -121,7 +124,7 @@ def check_item(item_code, own_rows, forecast_weekly, multiplier=None):
 	}
 
 
-def annotate_preview(preview, rows):
+def annotate_preview(preview, rows, customer=None):
 	"""Add the limit check to each preview row that would really get forecast
 	quantity, so the dialog can warn before anything is created."""
 	multiplier = forecast_limit_multiplier()
@@ -133,7 +136,9 @@ def annotate_preview(preview, rows):
 		p["forecast_flag"] = False
 		p["limit_multiplier"] = multiplier
 		if flt(p.get("auto_qty")) > 0:
-			res = check_item(p["item_code"], own_by_item.get(p["item_code"], []), p.get("predicted_value"), multiplier)
+			res = check_item(
+				p["item_code"], own_by_item.get(p["item_code"], []), p.get("predicted_value"), multiplier, customer
+			)
 			p["history_weekly"] = res["history_weekly"]
 			p["forecast_ratio"] = res["ratio"]
 			p["forecast_flag"] = res["flagged"]
@@ -154,7 +159,7 @@ def _doc_rows(doc):
 	]
 
 
-def forecast_flags_for_rows(rows, multiplier=None):
+def forecast_flags_for_rows(rows, multiplier=None, customer=None):
 	"""Items whose auto-forecast weekly qty is over the limit. Auto rows are
 	weekly and equal per item, so the weekly figure is their average."""
 	multiplier = forecast_limit_multiplier() if multiplier is None else multiplier
@@ -166,7 +171,7 @@ def forecast_flags_for_rows(rows, multiplier=None):
 	flags = []
 	for item_code, auto_rows in auto.items():
 		total = sum(flt(r["quantity"]) for r in auto_rows)
-		res = check_item(item_code, own.get(item_code, []), total / len(auto_rows), multiplier)
+		res = check_item(item_code, own.get(item_code, []), total / len(auto_rows), multiplier, customer)
 		if res["flagged"]:
 			res["forecast_total"] = round(total, 2)
 			res["weeks"] = len(auto_rows)
@@ -208,7 +213,7 @@ def get_report(schedule_name):
 	reconciles = abs(file_total - (system_qty + skipped_qty)) <= max(1.0, file_total * 0.001) if file_total else None
 	edited_since_upload = abs(system_qty - included_qty) > max(1.0, included_qty * 0.001) if included_qty else False
 
-	flags = forecast_flags_for_rows(rows)
+	flags = forecast_flags_for_rows(rows, customer=doc.customer)
 	signature = _signature(flags)
 	approved = bool(
 		flags and cint(doc.get("forecast_approved")) and doc.get("forecast_approval_signature") == signature
@@ -297,7 +302,7 @@ def approve_forecast_limit(schedule_name, note):
 	if doc.docstatus != 0:
 		frappe.throw(_("Only a Draft schedule can be approved."))
 
-	flags = forecast_flags_for_rows(_doc_rows(doc))
+	flags = forecast_flags_for_rows(_doc_rows(doc), customer=doc.customer)
 	if not flags:
 		return {"status": "ok", "message": _("Nothing above the limit - no approval needed.")}
 
@@ -334,7 +339,7 @@ def enforce_before_submit(doc):
 			title=_("Pre-submit Check"),
 		)
 
-	flags = forecast_flags_for_rows(_doc_rows(doc))
+	flags = forecast_flags_for_rows(_doc_rows(doc), customer=doc.customer)
 	if flags:
 		approved = cint(doc.get("forecast_approved")) and doc.get("forecast_approval_signature") == _signature(flags)
 		if not approved:
@@ -362,6 +367,82 @@ def cover_months(available_qty, order_qty, monthly_demand):
 	return round((flt(available_qty) + flt(order_qty)) / flt(monthly_demand), 1)
 
 
+DAYS_PER_MONTH = 30.4375
+# the rate assumed once the known demand has run out is the average of the last 13 weeks
+TAIL_WEEKS = 13
+
+
+def make_profile(weekly, monthly_rate=None):
+	"""Demand profile of one item, stored on the Material Request line:
+	{"b": [qty of week 1, week 2, ...] counted from today (week 1 also holds
+	anything overdue), "t": monthly rate assumed once the known demand has run
+	out}. Weeks after the data ends are not demand and are dropped; the tail
+	rate is the average monthly rate of the last TAIL_WEEKS weeks of data."""
+	weekly = [round(flt(b), 2) for b in (weekly or [])]
+	while weekly and weekly[-1] <= 0:
+		weekly.pop()
+	if weekly:
+		last = weekly[-TAIL_WEEKS:]
+		tail = sum(last) / (len(last) * 7.0 / DAYS_PER_MONTH)
+	else:
+		tail = flt(monthly_rate)
+	return {"b": weekly, "t": round(tail, 2)}
+
+
+def parse_profile(text):
+	try:
+		data = json.loads(text) if text else None
+	except (TypeError, ValueError):
+		return None
+	if not isinstance(data, dict) or not isinstance(data.get("b"), list):
+		return None
+	return {"b": [flt(x) for x in data["b"]], "t": flt(data.get("t"))}
+
+
+def _round1(value):
+	"""One decimal, half up - the same as the Material Request form's JS."""
+	return math.floor(value * 10 + 0.5) / 10
+
+
+def cover_from_profile(available_qty, order_qty, profile):
+	"""Months the stock lasts, worked out week by week: what is on hand/on order
+	plus this order is used up against week 1's demand, then week 2's, and so on
+	(a week with less stock left than demand counts as a fraction); weeks are
+	turned into months at 7 / 30.4375. If the stock outlasts all the demand
+	known, the rest is spread over the tail rate. 0 when there is no stock and
+	None when there is no demand at all. This is why a customer whose schedule
+	is shorter simply stops counting once it ends."""
+	weeks, tail = profile["b"], flt(profile.get("t"))
+	if not any(b > 0 for b in weeks) and tail <= 0:
+		return None
+	remaining = max(flt(available_qty) + flt(order_qty), 0.0)
+	if remaining <= 0:
+		return 0.0
+	elapsed = 0.0  # in weeks
+	for demand in weeks:
+		if demand <= 0:
+			elapsed += 1
+		elif remaining >= demand:
+			remaining -= demand
+			elapsed += 1
+		else:
+			return _round1((elapsed + remaining / demand) * 7.0 / DAYS_PER_MONTH)
+	months = elapsed * 7.0 / DAYS_PER_MONTH
+	if tail > 0:
+		months += remaining / tail
+	return _round1(months)
+
+
+def line_cover(row, qty=None):
+	"""Cover for one Material Request line: week by week from its stored
+	profile, or the older flat figure for a line made before profiles."""
+	order = flt(row.get("qty") if qty is None else qty)
+	profile = parse_profile(row.get("custom_sp_demand_buckets"))
+	if profile:
+		return cover_from_profile(row.get("custom_sp_available_qty"), order, profile)
+	return cover_months(row.get("custom_sp_available_qty"), order, row.get("custom_sp_monthly_demand"))
+
+
 def mr_excess_lines(doc):
 	"""Lines of an auto Material Request whose cover (recomputed from the
 	qty now on the line) is above the limit."""
@@ -371,9 +452,9 @@ def mr_excess_lines(doc):
 	lines = []
 	for r in doc.items:
 		monthly = flt(r.get("custom_sp_monthly_demand"))
-		if monthly <= 0:
+		if monthly <= 0 and not parse_profile(r.get("custom_sp_demand_buckets")):
 			continue
-		cover = cover_months(r.get("custom_sp_available_qty"), r.qty, monthly)
+		cover = line_cover(r)
 		if cover is not None and cover > limit + 0.05:
 			lines.append(
 				{

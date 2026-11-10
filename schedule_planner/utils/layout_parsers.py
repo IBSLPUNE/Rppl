@@ -57,6 +57,22 @@ def _row(code, name, when, qty, label):
 	}
 
 
+def _seen(starts, code, when):
+	"""Remember the earliest date printed for a part, zero or not."""
+	if code and (code not in starts or when < starts[code]):
+		starts[code] = when
+
+
+def _stamp(rows, starts):
+	"""Put each part's first printed date (zero or non-zero quantity) on its rows
+	as item_start - the forecast months are counted from it."""
+	for r in rows:
+		when = starts.get(r["item_code"])
+		if when:
+			r["item_start"] = str(when)
+	return rows
+
+
 def _merge(rows):
 	"""Same item + date + type twice (e.g. one part under two POs): add up."""
 	merged, order = {}, []
@@ -98,6 +114,7 @@ def parse_martinrea_cms(text):
 	rows, current, name, loose = [], None, {}, 0
 	describing = False
 	horizon = None
+	starts = {}
 	for line in text.splitlines():
 		part = re.match(r"\s*Part #:\s*(\S+)", line)
 		if part:
@@ -122,6 +139,7 @@ def parse_martinrea_cms(text):
 			qty = _num(m.group(4))
 			when = _d(m.group(1))
 			horizon = when if horizon is None or when > horizon else horizon
+			_seen(starts, current, when)
 			if qty > 0:
 				rows.append(_row(current, name.get(current), when, qty, m.group(3)))
 
@@ -132,6 +150,7 @@ def parse_martinrea_cms(text):
 	text_by_part = {k: re.sub(r"\s+", " ", " ".join(v)).strip(" ,") for k, v in name.items()}
 	for r in rows:
 		r["item_name"] = text_by_part.get(r["item_code"]) or r["item_code"]
+	_stamp(rows, starts)
 
 	header = {
 		"release_number": head.group(1),
@@ -168,6 +187,7 @@ def parse_techform_portal(text):
 
 	rows, current, name, loose = [], None, {}, 0
 	horizon = None
+	starts = {}
 	for line in text.splitlines():
 		part = re.match(r"\s*Part Number:\s*(\S+)\s+Description:\s*(.*?)\s+Vendor Part", line)
 		if part:
@@ -180,12 +200,14 @@ def parse_techform_portal(text):
 			qty = _num(m.group(2))
 			when = _d(m.group(1))
 			horizon = when if horizon is None or when > horizon else horizon
+			_seen(starts, current, when)
 			if qty > 0:
 				rows.append(_row(current, name.get(current), when, qty, m.group(5)))
 
 	parsed_lines = sum(1 for line in text.splitlines() if _TECHFORM_ROW.match(line))
 	if not loose or loose != parsed_lines:
 		return None
+	_stamp(rows, starts)
 
 	header = {
 		"release_number": head.group(1),
@@ -227,6 +249,7 @@ def parse_techform_acs(text):
 
 	lines = text.splitlines()
 	rows, name, horizon = [], {}, None
+	starts = {}
 	current, cells_expected, cells_read = None, 0, 0
 	parts_seen = 0
 	i = 0
@@ -265,6 +288,7 @@ def parse_techform_acs(text):
 			for token, qty_text, label in zip(dates, qtys, labels):
 				when = _d(token)
 				horizon = when if horizon is None or when > horizon else horizon
+				_seen(starts, current, when)
 				cells_read += 1
 				qty = _num(qty_text)
 				if qty > 0:
@@ -277,6 +301,7 @@ def parse_techform_acs(text):
 		return None
 	for r in rows:
 		r["item_name"] = name.get(r["item_code"]) or r["item_code"]
+	_stamp(rows, starts)
 
 	header = {
 		"release_number": head.group(1),
@@ -404,6 +429,7 @@ def parse_mytox_mrr(text, today=None):
 
 	rows = []
 	horizon = None
+	starts = {}
 	for entry in entries:
 		if not entry["part"]:
 			return None
@@ -422,6 +448,7 @@ def parse_mytox_mrr(text, today=None):
 			if token.upper() != "PAST-DUE":
 				seen = _d(token)
 				horizon = seen if horizon is None or seen > horizon else horizon
+				_seen(starts, entry["part"], seen)
 			if qty <= 0:
 				continue
 			if token.upper() == "PAST-DUE":
@@ -434,6 +461,7 @@ def parse_mytox_mrr(text, today=None):
 
 	if not entries:
 		return None
+	_stamp(rows, starts)
 	header = {
 		"release_number": number.group(1),
 		"supplier_vendor": vendor.group(1) if vendor else "",

@@ -132,7 +132,7 @@
   "fieldname": "custom_sp_forecast_method",
   "fieldtype": "Select",
   "label": "Auto Forecast Method (Schedule Planner)",
-  "options": "\nAverage of Last 4 Weeks\nAverage Weekly Shipment - Last 3 Months\nAverage Weekly Shipment - Last 6 Months\nAverage Weekly Shipment - Last 9 Months",
+  "options": "\nAverage of Last 4 Weeks\nAverage Weekly Shipment - Last 3 Months\nAverage Weekly Shipment - Last 6 Months\nAverage Weekly Shipment - Last 9 Months\nAverage of Customer Document",
   "insert_after": "customer_group",
   "name": "Customer-custom_sp_forecast_method",
   "no_copy": 1,
@@ -188,6 +188,20 @@
   "read_only": 1,
   "in_list_view": 1,
   "precision": "1"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Material Request Item",
+  "fieldname": "custom_sp_demand_buckets",
+  "fieldtype": "Long Text",
+  "label": "Demand by Month (Schedule Planner)",
+  "insert_after": "custom_sp_cover_months",
+  "name": "Material Request Item-custom_sp_demand_buckets",
+  "hidden": 1,
+  "read_only": 1,
+  "no_copy": 1,
+  "print_hide": 1,
+  "description": "Month-by-month demand the months of cover is worked out from."
  },
  {
   "doctype": "Custom Field",

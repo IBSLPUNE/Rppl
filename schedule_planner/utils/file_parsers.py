@@ -203,17 +203,19 @@ def _parse_tabular(file_path, fmt):
 			col_by_target[target] = match
 
 	rows = []
+	starts = {}
 	for _, r in df.iterrows():
 		item_code = str(r.get(col_by_target.get("item_code"), "")).strip()
 		if not item_code or item_code.lower() == "nan":
 			continue
 
 		qty = _to_float(r.get(col_by_target.get("quantity")))
-		if qty <= 0:
-			continue
-
 		delivery_date = _to_date(r.get(col_by_target.get("delivery_date")))
 		if not delivery_date:
+			continue
+		# first date the item appears in the sheet, even with a zero quantity
+		_note_start(starts, item_code, delivery_date)
+		if qty <= 0:
 			continue
 
 		demand_type_raw = str(r.get(col_by_target.get("demand_type"), "") or "").strip()
@@ -231,6 +233,21 @@ def _parse_tabular(file_path, fmt):
 			}
 		)
 
+	return _stamp_starts(rows, starts)
+
+
+def _note_start(starts, item_code, when):
+	when = str(when)
+	if item_code not in starts or when < starts[item_code]:
+		starts[item_code] = when
+
+
+def _stamp_starts(rows, starts):
+	"""item_start = the item's first date in the sheet (zero or non-zero qty).
+	The forecast months are counted from it."""
+	for r in rows:
+		if starts.get(r["item_code"]):
+			r["item_start"] = starts[r["item_code"]]
 	return rows
 
 
@@ -447,6 +464,8 @@ def _rows_from_wide(raw, header_row_idx, fmt):
 		)
 
 	rows = []
+	starts = {}
+	first_col_date = str(min(d for _, d, _ in date_cols))
 	for row_idx in range(header_row_idx + 1, len(raw)):
 		row = list(raw.iloc[row_idx])
 		item_code = str(row[item_code_idx]).strip()
@@ -455,6 +474,8 @@ def _rows_from_wide(raw, header_row_idx, fmt):
 		item_name = str(row[item_name_idx]).strip() if item_name_idx is not None else ""
 		item_name = item_name if item_name and item_name.lower() != "nan" else item_code
 
+		# every item in a weekly-column sheet starts at the sheet's first date column
+		_note_start(starts, item_code, first_col_date)
 		for col_idx, delivery_date, demand_type in date_cols:
 			qty = _to_float(row[col_idx])
 			if qty <= 0:
@@ -469,7 +490,7 @@ def _rows_from_wide(raw, header_row_idx, fmt):
 				}
 			)
 
-	return rows
+	return _stamp_starts(rows, starts)
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +593,7 @@ def _parse_pdf_techform_v1(text):
 
 	blocks = part_header_re.split(cleaned)[1:]
 	rows = []
+	starts = {}
 
 	for block in blocks:
 		lines = [l for l in block.split("\n") if l.strip()]
@@ -613,8 +635,6 @@ def _parse_pdf_techform_v1(text):
 				qty = float(all_qtys[i])
 			except ValueError:
 				continue
-			if qty <= 0:
-				continue
 
 			delivery_date = None
 			for fmt in ("%m/%d/%y", "%m/%d/%Y"):
@@ -624,6 +644,9 @@ def _parse_pdf_techform_v1(text):
 				except ValueError:
 					continue
 			if not delivery_date:
+				continue
+			_note_start(starts, item_code, delivery_date)
+			if qty <= 0:
 				continue
 
 			rows.append(
@@ -636,7 +659,7 @@ def _parse_pdf_techform_v1(text):
 				}
 			)
 
-	return rows
+	return _stamp_starts(rows, starts)
 
 
 PDF_PARSER_REGISTRY = {

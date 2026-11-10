@@ -13,6 +13,8 @@ it's the transparency layer on top of the same one source of truth."""
 import frappe
 from frappe import _
 
+from frappe.utils import getdate
+
 from schedule_planner.utils import material_request
 
 
@@ -29,16 +31,15 @@ def execute(filters=None):
 	if status_filter:
 		rows = [r for r in rows if r["status"] == status_filter]
 
-	item_names = {}
+	item_names, item_uoms = {}, {}
 	if rows:
-		item_names = {
-			d.name: d.item_name
-			for d in frappe.get_all(
-				"Item",
-				filters={"name": ["in", [r["item_code"] for r in rows]]},
-				fields=["name", "item_name"],
-			)
-		}
+		for d in frappe.get_all(
+			"Item",
+			filters={"name": ["in", [r["item_code"] for r in rows]]},
+			fields=["name", "item_name", "stock_uom"],
+		):
+			item_names[d.name] = d.item_name
+			item_uoms[d.name] = d.stock_uom
 
 	data = []
 	for r in rows:
@@ -46,6 +47,7 @@ def execute(filters=None):
 			{
 				"item_code": r["item_code"],
 				"item_name": item_names.get(r["item_code"], r["item_code"]),
+				"uom": item_uoms.get(r["item_code"]) or "Nos",
 				"demand_source": r["demand_source"],
 				"total_demand": r["total_demand"],
 				"current_stock": r["current_stock"],
@@ -71,6 +73,7 @@ def execute(filters=None):
 	columns = [
 		{"label": _("Item Code"), "fieldname": "item_code", "fieldtype": "Link", "options": "Item", "width": 130},
 		{"label": _("Item Name"), "fieldname": "item_name", "fieldtype": "Data", "width": 170},
+		{"label": _("UOM (all qty)"), "fieldname": "uom", "fieldtype": "Data", "width": 90},
 		{"label": _("Demand Source"), "fieldname": "demand_source", "fieldtype": "Data", "width": 190},
 		{"label": _("Total Demand"), "fieldname": "total_demand", "fieldtype": "Float", "width": 110},
 		{"label": _("Current Stock"), "fieldname": "current_stock", "fieldtype": "Float", "width": 110},
@@ -97,14 +100,18 @@ def execute(filters=None):
 		else "No live Auto Material Request right now - nothing is short."
 	)
 	message = (
-		f"Demand window: {snapshot['start_date']} to {snapshot['end_date']} "
+		f"<b>All quantities are in the item's stock UOM (Nos).</b> Purchase Order, Material Request and "
+		f"Delivery Note quantities raised in another UOM are converted to Nos first. "
+		f"Demand window: {getdate(snapshot['start_date']):%d-%b-%Y} to {getdate(snapshot['end_date']):%d-%b-%Y} "
 		f"({snapshot['planning_months']}M horizon, {snapshot['grace_days']}d overdue grace). "
-		f"Required-by date used for new lines: {snapshot['required_by']} "
+		f"Required-by date used for new lines: {getdate(snapshot['required_by']):%d-%b-%Y} "
 		f"({snapshot['lead_time_months']}M lead time). "
 		f"A Material Request line is raised only when there is a shortfall and, for an item with a Re-order "
 		f"Level, Available (Stock + Open PO + Other MR) is below that level; qty = greatest of net shortfall, "
 		f"Min Order Qty and Re-order Qty. "
-		f"Cover After Order = (Available + Order Qty) / Monthly Demand; above {snapshot['cover_limit']:g} months "
+		f"Monthly Demand = the sum of each customer's own monthly rate (its quantity / the months its schedule "
+		f"covers). Cover After Order = how many months (Available + Order Qty) lasts when used up week by week "
+		f"against each week's demand; above {snapshot['cover_limit']:g} months "
 		f"it is shown in red and the Material Request needs approval. {pool_note}"
 	)
 
