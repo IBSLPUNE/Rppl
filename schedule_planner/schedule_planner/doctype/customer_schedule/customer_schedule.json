@@ -7,10 +7,12 @@
  "field_order": [
   "naming_series",
   "customer",
+  "customer_name",
   "supplier_vendor",
   "release_number",
   "column_break_1",
   "schedule_date",
+  "horizon_end",
   "schedule_format",
   "source_file",
   "status",
@@ -18,6 +20,27 @@
   "schedule_items",
   "revision_log_tab",
   "revision_log",
+  "precheck_tab",
+  "file_total_qty",
+  "file_included_qty",
+  "skipped_qty",
+  "file_line_count",
+  "precheck_col",
+  "file_months",
+  "file_from_date",
+  "file_to_date",
+  "skipped_part_count",
+  "ack_section",
+  "skipped_acknowledged",
+  "acknowledged_by",
+  "acknowledged_on",
+  "skipped_parts_json",
+  "ack_col",
+  "forecast_approved",
+  "forecast_approved_by",
+  "forecast_approved_on",
+  "forecast_approval_note",
+  "forecast_approval_signature",
   "amended_from"
  ],
  "fields": [
@@ -35,6 +58,16 @@
    "label": "Customer",
    "options": "Customer",
    "reqd": 1
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Customer Name",
+   "fetch_from": "customer.customer_name",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "fetch_if_empty": 0
   },
   {
    "fieldname": "supplier_vendor",
@@ -57,6 +90,13 @@
    "fieldtype": "Date",
    "in_list_view": 1,
    "label": "Schedule Date"
+  },
+  {
+   "fieldname": "horizon_end",
+   "fieldtype": "Date",
+   "label": "File Horizon End",
+   "read_only": 1,
+   "description": "Last week printed in the customer's file (zero weeks included). Generated forecast starts after this date."
   },
   {
    "fieldname": "schedule_format",
@@ -102,6 +142,138 @@
    "label": "Revision Log",
    "options": "Schedule Revision Log",
    "read_only": 1
+  },
+  {
+   "fieldname": "precheck_tab",
+   "fieldtype": "Tab Break",
+   "label": "Pre-submit Check"
+  },
+  {
+   "fieldname": "file_total_qty",
+   "fieldtype": "Float",
+   "label": "Total Qty in File",
+   "read_only": 1
+  },
+  {
+   "fieldname": "file_included_qty",
+   "fieldtype": "Float",
+   "label": "Qty Loaded into Schedule",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skipped_qty",
+   "fieldtype": "Float",
+   "label": "Qty of Skipped Parts",
+   "read_only": 1
+  },
+  {
+   "fieldname": "file_line_count",
+   "fieldtype": "Int",
+   "label": "Lines Loaded",
+   "read_only": 1
+  },
+  {
+   "fieldname": "precheck_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "file_months",
+   "fieldtype": "Int",
+   "label": "Months in File",
+   "read_only": 1
+  },
+  {
+   "fieldname": "file_from_date",
+   "fieldtype": "Date",
+   "label": "File From",
+   "read_only": 1
+  },
+  {
+   "fieldname": "file_to_date",
+   "fieldtype": "Date",
+   "label": "File To",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skipped_part_count",
+   "fieldtype": "Int",
+   "label": "Skipped Part Numbers",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ack_section",
+   "fieldtype": "Section Break",
+   "label": "Acknowledgement and Approval"
+  },
+  {
+   "fieldname": "skipped_acknowledged",
+   "fieldtype": "Check",
+   "label": "Skipped Parts Acknowledged",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "acknowledged_by",
+   "fieldtype": "Link",
+   "label": "Acknowledged By",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "User"
+  },
+  {
+   "fieldname": "acknowledged_on",
+   "fieldtype": "Datetime",
+   "label": "Acknowledged On",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "skipped_parts_json",
+   "fieldtype": "Long Text",
+   "label": "Skipped Parts (JSON)",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "ack_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "forecast_approved",
+   "fieldtype": "Check",
+   "label": "Forecast Above Limit Approved",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "forecast_approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "User"
+  },
+  {
+   "fieldname": "forecast_approved_on",
+   "fieldtype": "Datetime",
+   "label": "Approved On",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "forecast_approval_note",
+   "fieldtype": "Small Text",
+   "label": "Approval Reason",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "forecast_approval_signature",
+   "fieldtype": "Data",
+   "label": "Approval Signature",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
   },
   {
    "fieldname": "amended_from",
@@ -163,5 +335,6 @@
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "customer,customer_name,release_number"
 }

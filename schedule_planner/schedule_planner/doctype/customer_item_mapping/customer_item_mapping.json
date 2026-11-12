@@ -1,0 +1,113 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "customer",
+  "file_part_no",
+  "file_description",
+  "column_break_1",
+  "item_code",
+  "item_name",
+  "enabled",
+  "section_break_1",
+  "source",
+  "last_used_on"
+ ],
+ "fields": [
+  {
+   "description": "The customer whose files use this part number. The same number can mean a different item for another customer, so mappings are per customer.",
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1
+  },
+  {
+   "description": "Exactly as printed in the customer's schedule file (case, spaces and dashes are ignored when matching).",
+   "fieldname": "file_part_no",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Part Number in Customer File",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "file_description",
+   "fieldtype": "Data",
+   "label": "Description in Customer File"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "ERPNext Item",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fetch_from": "item_code.item_name",
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Item Name",
+   "read_only": 1
+  },
+  {
+   "default": "1",
+   "description": "Untick to stop using this mapping without deleting it.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "section_break_1",
+   "fieldtype": "Section Break",
+   "label": "History"
+  },
+  {
+   "default": "Manual",
+   "description": "Manual: entered by hand. Confirmed on Upload: chosen by a user in the Item Mapping step of a schedule upload.",
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Created From",
+   "options": "Manual\nConfirmed on Upload",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_used_on",
+   "fieldtype": "Date",
+   "label": "Last Used On",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-01-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Schedule Planner",
+ "name": "Customer Item Mapping",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "email": 1, "export": 1, "print": 1, "read": 1, "report": 1, "role": "System Manager", "share": 1, "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "report": 1, "role": "Sales Manager", "write": 1},
+  {"create": 1, "read": 1, "report": 1, "role": "Sales User", "write": 1},
+  {"read": 1, "report": 1, "role": "Purchase User"},
+  {"read": 1, "report": 1, "role": "Stock User"}
+ ],
+ "search_fields": "file_part_no,item_code,customer",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "file_part_no"
+}

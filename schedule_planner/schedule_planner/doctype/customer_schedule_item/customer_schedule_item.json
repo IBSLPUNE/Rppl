@@ -7,12 +7,18 @@
  "field_order": [
   "item_code",
   "item_name",
+  "file_part_no",
   "column_break_1",
   "delivery_date",
+  "item_start_date",
+  "item_end_date",
   "quantity",
   "demand_type",
   "section_break_1",
   "auto_forecast",
+  "forecast_method",
+  "forecast_source",
+  "forecast_basis_json",
   "previous_quantity",
   "column_break_2",
   "linked_sales_order",
@@ -45,6 +51,20 @@
    "reqd": 1
   },
   {
+   "fieldname": "item_start_date",
+   "fieldtype": "Date",
+   "label": "Item First Date in Sheet",
+   "read_only": 1,
+   "description": "First date this item appears in the customer's sheet (zero or non-zero quantity). Forecast months are counted from it."
+  },
+  {
+   "fieldname": "item_end_date",
+   "fieldtype": "Date",
+   "label": "Item Last Date in Sheet",
+   "read_only": 1,
+   "description": "Last date this item appears in the customer's sheet (zero or non-zero quantity). Used by the 'After Item's End Date' auto forecast start."
+  },
+  {
    "fieldname": "quantity",
    "fieldtype": "Float",
    "in_list_view": 1,
@@ -70,6 +90,28 @@
    "label": "Auto Forecast"
   },
   {
+   "fieldname": "forecast_method",
+   "fieldtype": "Select",
+   "label": "Forecast Method",
+   "options": "\nAverage of Last 4 Weeks\nAverage Weekly Shipment - Last 3 Months\nAverage Weekly Shipment - Last 6 Months\nAverage Weekly Shipment - Last 9 Months\nAverage of Customer Document",
+   "read_only": 1,
+   "description": "Auto-forecast method chosen for this item."
+  },
+  {
+   "fieldname": "forecast_source",
+   "fieldtype": "Data",
+   "label": "Forecast Quantity Source",
+   "read_only": 1,
+   "description": "Which figure gave the weekly qty: the Forecast Method or the customer document's own average (whichever was higher)."
+  },
+  {
+   "fieldname": "forecast_basis_json",
+   "fieldtype": "Long Text",
+   "label": "Forecast Basis",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
    "fieldname": "previous_quantity",
    "fieldtype": "Float",
    "label": "Previous Quantity",
@@ -91,6 +133,13 @@
    "fieldtype": "Link",
    "label": "Linked Sales Forecast",
    "options": "Sales Forecast",
+   "read_only": 1
+  },
+  {
+   "fieldname": "file_part_no",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Part No",
    "read_only": 1
   }
  ],

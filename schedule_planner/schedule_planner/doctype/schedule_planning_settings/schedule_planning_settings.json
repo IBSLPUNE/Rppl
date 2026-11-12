@@ -17,13 +17,25 @@
   "enable_shipping_fallback_forecast",
   "column_break_3",
   "shipping_fallback_months",
+  "apply_min_order_qty",
   "last_mr_reconciled_on",
+  "section_break_items",
+  "auto_create_missing_items",
   "section_break_1",
   "llm_provider",
   "llm_model",
   "column_break_2",
   "llm_api_key",
-  "llm_endpoint"
+  "llm_endpoint",
+  "auto_forecast_section",
+  "auto_forecast_start",
+  "use_document_average",
+  "document_avg_period",
+  "safety_section",
+  "forecast_limit_multiplier",
+  "max_cover_months",
+  "safety_column_break",
+  "approver_role"
  ],
  "fields": [
   {
@@ -154,6 +166,85 @@
    "fieldname": "llm_endpoint",
    "fieldtype": "Data",
    "label": "Endpoint Override"
+  },
+  {
+   "default": "1",
+   "description": "When ticked, an item's Material Request quantity is never lower than its supplier Minimum Order Qty (Item > Minimum Order Qty, or the Re-order Qty on the Item's Reorder table). Example: shortfall 1,000 and MOQ 2,500 -> request 2,500; shortfall 3,200 and MOQ 2,500 -> request 3,200. Untick to always request exactly the shortfall.",
+   "fieldname": "apply_min_order_qty",
+   "fieldtype": "Check",
+   "label": "Apply Supplier Minimum Order Qty"
+  },
+  {
+   "fieldname": "section_break_items",
+   "fieldtype": "Section Break",
+   "label": "Item Matching"
+  },
+  {
+   "default": "0",
+   "fieldname": "auto_create_missing_items",
+   "fieldtype": "Check",
+   "label": "Auto-create Missing Items",
+   "description": "Off (recommended): when a customer part number matches no Item, the user must map it, tick Create Item, or skip it. On: unmatched lines silently create a new Item (old behaviour)."
+  },
+  {
+   "fieldname": "safety_section",
+   "fieldtype": "Section Break",
+   "label": "Safety Limits"
+  },
+  {
+   "fieldname": "forecast_limit_multiplier",
+   "fieldtype": "Float",
+   "label": "Forecast Limit (x history)",
+   "default": "2",
+   "description": "An auto-forecast weekly qty above this multiple of the item's history (file average or last 6 months' shipments, whichever is higher) needs approval before the schedule can be submitted. 0 = no limit."
+  },
+  {
+   "fieldname": "max_cover_months",
+   "fieldtype": "Float",
+   "label": "Maximum Months of Cover",
+   "default": "12",
+   "description": "A Material Request line that leaves more than this many months of stock (available + order) against the monthly demand needs approval. 0 = no limit."
+  },
+  {
+   "fieldname": "safety_column_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "approver_role",
+   "fieldtype": "Link",
+   "label": "Approver Role",
+   "options": "Role",
+   "default": "System Manager",
+   "description": "Users with this role can approve a forecast above the limit and submit a Material Request with excess cover."
+  },
+  {
+   "fieldname": "auto_forecast_section",
+   "fieldtype": "Section Break",
+   "label": "Auto-Forecast: Customer Document Average"
+  },
+  {
+   "default": "1",
+   "fieldname": "use_document_average",
+   "fieldtype": "Check",
+   "label": "Switch Items to the Document Average When It Is Higher",
+   "description": "Per item, if the customer document's own weekly average (the item's total quantity in the file / weeks of its period) is higher than the chosen Forecast Method's figure, the item's method is switched to 'Average of Customer Document' automatically. The user can change any item back. Untick to never switch automatically."
+  },
+  {
+   "default": "After Item's Last Non-Zero Quantity",
+   "fieldname": "auto_forecast_start",
+   "fieldtype": "Select",
+   "label": "Auto Forecast Starts",
+   "options": "After Item's Last Non-Zero Quantity\nAfter Item's End Date\nAfter End of File",
+   "description": "Where the auto forecast of an item begins. 'Item's last non-zero quantity': the week after the last date that has a quantity (zero weeks at the end are forecast too). 'Item's end date': the week after the item's last date in the sheet, zero quantity included. 'End of file': the week after the last date of the whole file, for every item."
+  },
+  {
+   "default": "Item first date to end of file",
+   "depends_on": "use_document_average",
+   "fieldname": "document_avg_period",
+   "fieldtype": "Select",
+   "label": "Document Average Period",
+   "options": "Item first date to end of file\nItem first date to item's last quantity\nItem first date to item's last date\nFirst date of file to end of file",
+   "description": "Which dates the document average is taken over. 'First date' is the item's first date in the sheet, zero or non-zero quantity. 'End of file' is the last week the customer's sheet covers (zero weeks included). 'Item's last quantity' ignores the zero weeks after the last quantity. 'Item's last date' is the item's own last date in the sheet, zero weeks included. 'First date of file' uses the same start for every item."
   }
  ],
  "index_web_pages_for_search": 1,

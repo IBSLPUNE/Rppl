@@ -13,7 +13,7 @@ customer revision, and must never count towards these stats.
 """
 
 import frappe
-from frappe.utils import flt, today
+from frappe.utils import flt, getdate, today
 
 # Raw is treated as part of the Forecast bucket for comparison purposes,
 # same as the original prototype did.
@@ -43,6 +43,11 @@ def detect_and_log_revisions(doc):
 	if not previous_name:
 		return {"firm_changes": 0, "forecast_changes": 0, "previous_schedule": None}
 
+	# Only compare from this release's own date onwards. Weeks that simply
+	# rolled off the front of the horizon (already shipped or past) are not
+	# something the customer revised, and must not be logged as "removed".
+	boundary = str(getdate(doc.schedule_date)) if doc.schedule_date else None
+
 	prev_rows = frappe.db.get_all(
 		"Customer Schedule Item",
 		filters={"parent": previous_name, "auto_forecast": 0},
@@ -50,6 +55,8 @@ def detect_and_log_revisions(doc):
 	)
 	old_map = {}
 	for row in prev_rows:
+		if boundary and str(row.delivery_date) < boundary:
+			continue
 		key = (row.item_code, str(row.delivery_date), _bucket(row.demand_type))
 		old_map[key] = old_map.get(key, 0) + flt(row.quantity)
 
@@ -58,6 +65,8 @@ def detect_and_log_revisions(doc):
 		if row.auto_forecast:
 			continue
 		if flt(row.quantity) <= 0:
+			continue
+		if boundary and str(row.delivery_date) < boundary:
 			continue
 		key = (row.item_code, str(row.delivery_date), _bucket(row.demand_type))
 		new_map[key] = new_map.get(key, 0) + flt(row.quantity)
