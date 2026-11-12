@@ -18,10 +18,11 @@ be created by hand in the UI.
    format* below). The file is parsed into item / delivery date / quantity /
    demand type (Firm or Forecast) rows.
 2. **Auto-forecast top-up**: if the customer only gave you 3 months but parts
-   lead time is 7, pick a target month count and one of two methods -
-   *Average of Last 4 Weeks* or *Average Weekly Shipment - Last 3 Months*
-   (real Delivery Note history). Untick any item you don't want auto-forecast
-   for (e.g. one that's closing).
+   lead time is 7, pick a target month count and one of four methods -
+   *Average of Last 4 Weeks*, or *Average Weekly Shipment* over the last
+   *3 / 6 / 9 Months* (real Delivery Note history). Untick any item you don't
+   want auto-forecast for (e.g. one that's closing). See *Auto-forecast
+   methods* below for the exact maths.
 3. **Create as Draft, review, then Submit.** Submitting is what triggers
    everything downstream:
    - Firm rows -> **one Sales Order per delivery date** (multiple items,
@@ -29,6 +30,14 @@ be created by hand in the UI.
    - If a date/item combination already has a submitted Sales Order from an
      earlier schedule and the quantity changed, that SO is **cancelled and
      amended** rather than duplicated.
+   - **Rate rule:** an order is submitted only when every item on it has a
+     rate (Item > Standard Selling Rate, or the customer's USD etc. price
+     list). If even one item has no rate the order is saved as a **Draft**
+     and a message lists the order and the items with no rate. Set the rate on
+     the order and submit it. A later schedule for the same date updates that
+     Draft in place (rates typed into it are kept) and submits it once every
+     rate is there; a submitted order that gets amended keeps the rate it
+     already had when the item's own rate is empty.
    - Forecast/Raw rows -> the customer's **Sales Forecast is wholesale
      replaced** (cancel + amend) - a new schedule makes the old forecast
      horizon obsolete.
@@ -98,6 +107,54 @@ Tune **Overdue Grace Period**, **Fall Back to Shipping History...**, and
 **Shipping History Window** in Schedule Planning Settings > Material Request
 Reconciliation.
 
+### Demand breakup shows how the auto forecast was worked out
+
+Double-click a *Total Demand* cell on the Material Planning Dashboard. Above the list, each auto forecast has a box with the **method**, the **period** it looked at, the **total** behind it (shipped qty month by month for the shipping methods, or the customer file's last 4 weeks), the **weekly average** (total / weeks) and finally *weekly qty x weeks = auto forecast*. Shipments are read for the period ending the day the schedule was created; if shipment records changed afterwards the box says so.
+
+### Units (everything is in Nos)
+
+Customer schedules, stock, demand, Min Order Qty and Re-order Level are all in the item's **stock UOM** (Nos). Purchase Orders, Material Requests and Delivery Notes can be raised in another UOM (Box, Kg ...), so their quantities are converted to stock UOM with each line's conversion factor *before* they are compared (open PO = (qty - received) x factor, other open MR = stock qty - ordered qty, shipments = stock qty). Without this, 10 Boxes of 100 on order would count as 10 and the shortfall would be overstated. The live Auto Material Request is raised in stock UOM, and the Material Planning Dashboard has a **UOM (all qty)** column so the client can see every figure is in Nos.
+
+### Re-order Level (when a Material Request is raised)
+
+If an item has a **Re-order Level** (Item > Reorder table, Purchase row for the
+planning warehouse), a Material Request line is raised only when
+
+    Available = Stock + Open PO + Other open MR   is BELOW the Re-order Level
+
+*and* there is a net shortfall. The quantity is the greatest of the net
+shortfall, the item's Minimum Order Qty and its Re-order Qty. An item with no
+Re-order Level behaves as before (a line is raised whenever there is a
+shortfall). Material Planning Dashboard shows Available, Re-order Level, Reorder
+Check and an **MR Decision** column ("Raise MR" / "Wait - available X is not
+below reorder level Y" / "No shortfall"). Available exactly equal to the level
+does not raise a line.
+
+### Supplier Minimum Order Qty (MOQ)
+
+A supplier often will not sell below a fixed quantity. The live Auto Material
+Request therefore never asks for less than an item's MOQ:
+
+| Shortfall | Item MOQ | Quantity on the Material Request |
+| --- | --- | --- |
+| 1,000 | 2,500 | **2,500** (raised to the MOQ) |
+| 3,200 | 2,500 | **3,200** (shortfall is already above the MOQ) |
+| 0 (covered) | 2,500 | no line - an item is never ordered just to meet a MOQ |
+
+The MOQ is read from the standard ERPNext Item master, so nothing extra has to
+be maintained: **Item > Minimum Order Qty**, and/or the **Re-order Qty** on the
+Item's *Reorder* table for the planning warehouse (Purchase rows only). If both
+are filled in, the larger one is used. The Material Planning Dashboard shows
+*Min Order Qty*, *Order Qty (after MOQ)* and *Extra Due To MOQ*, and each
+Material Request line's description explains the raise. Once that Material
+Request is submitted, the extra quantity counts as supply, so it is used up
+before anything new is requested. Untick **Apply Supplier Minimum Order Qty** in
+Schedule Planning Settings to always request exactly the shortfall.
+
+The Reorder table's *Re-order Level* (the stock level that triggers a reorder
+in plain ERPNext) is deliberately not used: Schedule Planner orders from
+customer demand, not from a stock threshold.
+
 ### If a Material Request doesn't seem to be created
 
 This is almost always one of two things, both visible immediately since a
@@ -110,6 +167,187 @@ with the actual reason:
 2. **Nothing is actually short right now** - stock, open POs, or another
    open Material Request already cover the demand. Open the **Material
    Planning Dashboard** report to see the live numbers per item.
+
+## Safety checks (wrong data must never turn into a purchase)
+
+Three guards sit between a schedule file and a purchase. The limits live in **Schedule Planning Settings > Safety Limits** (0 switches a limit off); the server enforces every rule, the dialogs only help the user clear them.
+
+**1. Pre-submit Check.** Clicking *Submit* on a Customer Schedule first opens a check: the total qty printed in the customer's file vs the qty now on the schedule (plus the qty of skipped part numbers), months and lines read from the file, and every part number that was skipped or left unmapped. Skipped parts must be ticked as acknowledged (who/when is stored and a comment is added). If the schedule no longer adds up to the file, the user must confirm the difference.
+
+**2. Forecast limit.** An auto-forecast weekly qty above *Forecast Limit* (default 2x) the item's history (the higher of the file's own weekly average and the last 6 months' shipments) is shown with a warning in the upload / Extend Forecast dialogs. Submit then needs a user with the *Approver Role* (default System Manager) to approve it with a written reason. The approval is tied to the exact forecast numbers: change the forecast and it must be approved again.
+
+**3. Months of cover.** Every Material Request line shows *Months of Cover After Order*: how long the stock lasts once this order has arrived, counted **week by week** - what is available plus the order qty is used up against the demand of week 1, then week 2, and so on (weeks become months at 7 / 30.4375). Red when above *Maximum Months of Cover* (default 12). An Auto Material Request with an over-limit line can be submitted only by the approver role and only with a *Cover Approval Note*. The Material Planning Dashboard shows the same figure. *Monthly Demand* is the **sum of each customer's own monthly rate** (its quantity in the window / the months between its first and last demand date), so an item one customer orders for 6 months (36,000 = 6,000 a month) and another for 9 months (36,000 = 4,000 a month) shows 10,000 a month, and the cover drops back to 4,000 a month once the first customer's schedule ends. The Demand breakup lists each customer's rate. The week-by-week demand is saved on the line (*Demand by Month*, hidden), so changing the qty on the form recalculates the same cover in the browser and on Submit; an older line without it keeps the flat figure (available + order) / monthly demand. If the stock outlasts all known demand, the rest is spread at the rate of the last 13 weeks of data; no stock = 0 months; no demand = no cover figure. An item with no schedule (shipping-history fallback) is flat. The order qty itself is unchanged: demand - (stock + open PO + other open MR).
+
+## Item Mapping (customer part numbers -> your Items)
+
+A customer's file uses *their* part numbers, not your item codes. After you
+upload a file, every distinct part number is matched to an Item in this order
+(first hit wins; case, spaces and `- / . _` are ignored):
+
+1. **Saved Mapping** - a *Customer Item Mapping* record created the last time
+   someone corrected or confirmed that part number for this customer.
+2. **Item Supplier** - Item > Supplier Items > *Supplier Part No*.
+3. **Customer Item** - Item > Customer Items > *Ref Code* (this customer only).
+4. **Item Code** - the number is simply your own item code.
+5. **Numbers in the description.** Many files print the customer's own part
+   number next to our code (e.g. `25367965 RIVET NUT`). Any number of 6+
+   characters with a run of 5+ digits found there is tried against 2-4, first
+   exactly, then as a whole number *inside* a longer Supplier Part No / Ref
+   Code (so `25367965` finds `M8X18.5 RIVET NUT PART#25367965 DRAWING#25473611`;
+   it does not match inside a longer run of digits). One Item = matched, two
+   or more = left for the user with the candidates listed.
+6. Otherwise it is **Not mapped**. Name-similarity suggestions are shown as
+   clickable chips but are **never picked automatically**. A number that
+   matches *more than one* Item is also left for the user to decide.
+
+If everything matched, the forecast dialog opens straight away with a
+"Review / change mapping" link. If anything is unresolved, an **Item Mapping**
+table opens first and the schedule **cannot continue until every row is
+resolved**: pick an Item, tick **Create Item** (new Item with the part number
+as its code), or tick **Skip** (those rows are left out). A choice that
+differs from the automatic result is saved to *Customer Item Mapping* and
+reused on every later upload for that customer.
+
+On a **Draft** schedule the **Item Mapping** button re-opens the same table to
+fix a wrong item later; every row of that part number is re-pointed. The
+customer's original number is kept on each row (*Customer Part No*).
+
+Settings > *Item Matching* > **Auto-create Missing Items** (default off) brings
+back the old behaviour of silently creating an Item for unknown codes.
+
+## Known customer layouts (read without AI)
+
+The layout is recognised from the file's own text, so nothing needs to be set
+up per customer. AI extraction is used **only** for a layout the app has never
+seen (or if a known layout stops adding up - see below).
+
+| Layout | Recognised by | Demand types |
+|---|---|---|
+| Martinrea (Canada and Riverside) | "SUPPLIER RELEASE PLANNING SCHEDULE"; Martinrea prints every part under its own latest release, so one file can hold many releases - the newest release # and date in the file identify the schedule | Firm = Firm; Forecast, Fabrication, Raw Material = Forecast |
+| Techform vendor planning schedule (report PO064R, ACS spool print) | "Vendor Planning Schedule", "Net Req." and "Auth Type" rows; release # and issue date from the page header; weeks printed in bands of 10 across pages are joined per part | Firm = Firm; Raw and Forecast = Forecast |
+| Techform / Magna portal print | "Planning Schedules", "Release Number:", "Issue Date:" | Firm = Firm; Forecast and Raw = Forecast |
+| Marwood / Plex | "ONLINE RELEASES TO SUPPLIERS" (no release number is printed, so the print time becomes `PLEX-yyyymmdd-hhmm`); one part under two POs is added up | per line Firm / Forecast |
+| Mytox | "MATERIAL REQUIREMENTS RELEASE": dates up to "Daily quantities end" are Firm, weekly and monthly buckets are Forecast; PAST-DUE is Firm dated today | see left |
+| Excel / CSV, weekly columns (e.g. Matcor) | a header row with a Part / PN column and 3+ date columns, Firm/Forecast band above | from the band row |
+| Excel / CSV, one row per date | Part, Date and Qty column headings in the first 10 rows | Demand Type column, else Forecast |
+
+Scanned (image-only) PDFs have no text to read and are not supported - ask the customer for the original PDF or Excel. Old `.xls` workbooks need the `xlrd` package (`bench pip install xlrd`); the app says so if it is missing.
+
+Safety check: after reading, each PDF reader counts the data lines in the text
+again and gives up (falling back to AI) if even one line did not parse as a
+full row. A layout that changes slightly therefore cannot silently lose rows.
+
+The schedule date and release number come from the file (Martinrea "Date:",
+Mytox "RELEASE DATE", Matcor "Date :"), so the duplicate-release check works
+and revisions compare against the right previous release. Revision detection
+only compares dates from the new release's date onwards, so weeks that simply
+rolled off the front are not logged as "removed".
+
+Excel `.xls` (old format) needs the `xlrd` package: `bench pip install xlrd`.
+
+## Customers billed in a foreign currency
+
+Sales Orders created from a schedule use the customer's own currency (the
+currency of its receivable account). The exchange rate comes from ERPNext's
+Currency Exchange records - if there is none for e.g. USD -> INR, submit stops
+with a clear message asking you to add one. Line rates come from the
+customer's Selling Price List when it is priced in that currency, otherwise
+the Item's Standard Rate (company currency) is converted with the exchange rate.
+
+## Auto-forecast methods
+
+| Method | Weekly quantity used |
+| --- | --- |
+| Average of Last 4 Weeks | the file's last 4 calendar weeks added up, divided by 4. **A week with no quantity counts as 0**: 100, 0, 400, 0 gives (100 + 0 + 400 + 0) / 4 = **125**, not 250. |
+| Average Weekly Shipment - Last 3 Months | submitted Delivery Note qty of the item over the last 3 months / 13 weeks |
+| Average Weekly Shipment - Last 6 Months | same, over 6 months / 26 weeks |
+| Average Weekly Shipment - Last 9 Months | same, over 9 months / 39 weeks |
+
+Notes:
+
+- The "last 4 weeks" end where the customer's file ends (the last week column /
+  date printed in it, stored on the schedule as **File Horizon End**), not at
+  the last week that happens to have a quantity - otherwise the trailing zero
+  weeks would be skipped. For layouts where the readers cannot see that (a
+  plain long table) the last row's date is used.
+- The method can be chosen **per item**: the dialog's *Auto Forecast Method* is
+  the default for every item, and each row of the item table has its own
+  *Forecast Method* dropdown. The method used is saved on that item's schedule
+  rows (**Forecast Method** field), and the Extend Forecast dialog starts from it.
+- **Remembered per customer:** when a schedule is created (or its forecast
+  extended) the dialog's method and every item's method are saved on the
+  Customer (*Auto Forecast Method (Schedule Planner)* on the Customer form, plus
+  a hidden per-item list). The next upload for that customer opens with them
+  already selected; change them in the dialog as needed, the new choice is saved
+  again. Needs `bench migrate` once (custom fields on Customer).
+- The item table in the upload / Extend Forecast dialog has an **Auto Forecast
+  Qty** column (and a total) showing how much will be added per item. It
+  updates live when you change the method, the total months, or untick an item,
+  and is computed by the same code that creates the rows.
+- **Items that end in monthly buckets** (e.g. the tail of a Mytox report: daily,
+  then weekly, then monthly columns): a 4-week window would fall between two
+  buckets, so Last 4 Weeks instead uses the weekly rate of the item's last 3
+  monthly buckets that have a quantity (each bucket's qty / weeks it covers,
+  averaged). Items whose last quantity is in a daily/weekly bucket (e.g. the
+  customer stops ordering after December) still use the normal 4-week window,
+  so they average 0.
+- **Forecast period.** "Total months" is counted from **each item's first date
+  in the customer's sheet, whether the quantity there is zero or not** (stored
+  on the schedule line as *Item First Date in Sheet*; in a weekly-column sheet
+  that is the first week column, in a PDF the first date printed for the part).
+  The auto-forecast runs weekly to that end date and starts where
+  *Schedule Planning Settings > Auto Forecast Starts* says (see below); by
+  default it is the **week right after the item's last non-zero quantity**. Sheet starts 04-Jan, item has
+  quantity only in Jan-Feb, 6 months: forecast runs from the first week after
+  February to 04-Jul. An item whose last quantity is already at or beyond its
+  end date gets nothing. Generated rows never feed back into an average.
+  Schedules created before this version have no first-date value (the item's
+  first non-zero quantity is used); they are not changed unless their
+  auto-forecast rows are deleted and Extend Forecast is run again.
+- **Forecast method "Average of Customer Document" (item by item).** Besides
+  Last 4 Weeks and the shipping averages there is a method that uses the
+  customer document's own weekly average for the item (all the item's quantity
+  in the file / weeks of its period). Where the user has not picked a method
+  for an item and the document average is **higher** than the chosen method's
+  figure (method 500 a week, document 600), the item's dropdown switches to
+  *Document Avg* by itself and 600 is used. An item whose method the user picked
+  (or that was saved for the customer) is never switched; changing any item's
+  dropdown back is respected. Changing the dialog-level method hands every item
+  back to the system. The dialog shows both quantities side by side (*Auto
+  Forecast Qty* = by method, *Auto Forecast by Document*), the one that will
+  really be created has a green tick. The schedule line stores the method used
+  and the comparison (*Forecast Quantity Source*), and the Demand breakup shows
+  it. **Schedule Planning Settings > Auto-Forecast: Customer Document Average**
+  switches the automatic switching on/off and sets the period: *Item first date
+  to end of file* (default; first date = the item's first date in the sheet,
+  zero or non-zero; end = last week the file covers, zero weeks included),
+  *Item first date to item's last quantity* (ignores the zero weeks after the
+  last quantity, so it gives a higher average when quantity is bunched early),
+  *Item first date to item's last date* (to the item's own last date in the
+  sheet, zero weeks included - the item's end, not the whole file's),
+  or *First date of file to end of file* (same start for every item). Weeks are
+  counted to the end of the last bucket, so 4 weekly columns = 4 weeks. An item
+  whose method gives 0 (e.g. last 4 weeks empty) is switched to the document
+  average too; untick the item to exclude it. Only methods the user picked are
+  remembered per customer for the next upload.
+- **Dates** in the schedule dialogs, the Material Planning Dashboard message and
+  the Demand breakup are shown as `02-Nov-2026`. ERPNext's own date fields
+  follow *System Settings > Date Format*, which has no month-name option;
+  `dd-mm-yyyy` is the closest.
+- An item whose method average is 0 (e.g. last 4 weeks all zero) gets the
+  document average instead; with the document comparison switched off in the
+  settings it gets no auto-forecast. Untick the item to exclude it.
+- Shipping averages sum the Delivery Notes of the item **for the schedule's own
+  customer**, so an item that two customers order gets each customer's own
+  forecast (not the combined shipments twice). Weeks without shipments count as
+  0. If that customer has no shipments for the item in the period, the shipping
+  method gives 0 (no fallback to the file's Last 4 Weeks) and the customer
+  document average is used when it is higher. The Material Planning Dashboard then adds up every
+  customer's latest schedule for the item; the Demand breakup lists the rows
+  per customer and one "how the auto forecast was worked out" block per
+  customer schedule.
+- The schedule needs `bench migrate` once after updating (new fields
+  *File Horizon End* on the schedule and *Forecast Method* on its item rows).
 
 ## Install
 
@@ -290,6 +528,8 @@ Building it yourself in the UI is quick and can't corrupt anything:
      and how often.
    - **Forecast Revision Analysis** (report) - per-item revision pivot.
    - **Customer Schedule Format** (list) - per-customer parsing config.
+   - **Customer Item Mapping** (list) - saved customer part number -> Item
+     overrides, editable by hand.
    - **Schedule Planning Settings** - global defaults.
 3. **Save**. That's the whole dashboard - Frappe keeps it as a normal
    Workspace record from here on (editable, shareable, safe to tweak).
@@ -305,14 +545,17 @@ schedule_planner/
                                       Material Request / Material Request Item
   utils/
     file_parsers.py                  PDF/Excel/CSV -> row dicts (hybrid parsing)
-    forecast_engine.py               the 2 auto-forecast methods + extension logic
+    layout_parsers.py                known customer layouts read without AI (Martinrea, Techform, Marwood, Mytox, weekly-column Excel)
+    forecast_engine.py               the auto-forecast methods (4 weeks, 3/6/9-month shipping) + extension logic
     sales_documents.py               SO per-date + amendment, SF wholesale replace
     material_request.py              live Auto MR reconciler + planning snapshot
     revision.py                      diff vs previous schedule, revision stats
-    items.py                         auto-create Item if a schedule references a new one
+    items.py                         create an Item only when explicitly allowed
+    item_mapping.py                  customer part no -> Item resolver + saved overrides
   schedule_planner/doctype/
     customer_schedule/                main submittable document (+ client script)
-    customer_schedule_item/           child: item/date/qty/demand rows
+    customer_schedule_item/           child: item/date/qty/demand rows (+ Customer Part No)
+    customer_item_mapping/            per-customer part number -> Item overrides
     schedule_revision_log/            child: what changed vs the previous schedule
     customer_schedule_format/         per-customer parsing config
     schedule_column_mapping/          child: source column -> target field
@@ -343,3 +586,23 @@ the same material twice; and submit a Delivery Note for an item that has no
 active schedule at all, to confirm the shipping-history fallback picks it
 up. The **Material Planning Dashboard** report is the fastest way to see
 all of this at once.
+
+### Forecast dialog: actual values and Weekly / Monthly preview
+- Under each figure in **Auto Forecast Qty (by method)** the dialog shows, in brackets, the number behind it: the item's shipped quantity for the shipping-average methods (e.g. 600 for the last 6 months) or the file's last 4 weeks total.
+- Under **Auto Forecast by Document** it shows the item's total quantity in the customer document.
+- **Predicted Forecast Preview** has a Weekly / Monthly switch. Monthly = weekly x 30.4375 / 7 (about 4.348). The choice stays while methods are changed and the preview recalculates. Sample Basis always stays weekly.
+
+### Setting: where the auto forecast starts
+*Schedule Planning Settings > Auto Forecast Starts* (needs `bench migrate` once):
+
+| Option | Auto forecast begins |
+|---|---|
+| After Item's Last Non-Zero Quantity (default) | the week after the last date of the item that has a quantity; zero weeks at the end of the item are forecast too |
+| After Item's End Date | the week after the item's last date in the sheet, zero quantity included (stored on each line as *Item Last Date in Sheet*) |
+| After End of File | the week after the last date of the whole file, the same for every item |
+
+The end date of the forecast is unchanged: each item's first date + the total months. Schedules uploaded before this setting have no item end date stored; for them "Item's End Date" uses the file's last date, or the last quantity date if that is not known either.
+
+### Forecast dialog: months in brackets
+- After each item's **Range** the months of data in the file are shown in brackets, e.g. `(2.5)` or `(4)`: first date to last date, the last week counted in full, 30.4375 days to a month.
+- Under the two auto-forecast qty columns the bracket is `(figure, months)`, e.g. `(45,000, 2.5)`: the figure behind the forecast and how many months of auto forecast it covers (weekly rows x 7 / 30.4375). When nothing is forecast only the figure is shown.
