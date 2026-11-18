@@ -67,11 +67,36 @@ def extract_header_and_rows(file_url, customer):
 			header, rows = known
 		else:
 			header, rows = _llm_infer_and_extract_tabular(file_path, fmt, customer)
-	elif fmt.layout == "Wide (Weekly Columns)":
-		header, rows = _parse_wide(file_path, fmt, customer)
 	else:
-		rows = _parse_tabular(file_path, fmt)
-		header = _default_header(customer, file_path)
+		# A saved layout (Template Mapping). If it no longer fits this file - another
+		# header row, a renamed column, a new sheet - fall back to recognising the
+		# layout from the file itself instead of failing.
+		header = rows = None
+		try:
+			if fmt.layout == "Wide (Weekly Columns)":
+				header, rows = _parse_wide(file_path, fmt, customer)
+			else:
+				rows = _parse_tabular(file_path, fmt)
+				header = _default_header(customer, file_path)
+		except Exception:
+			header = rows = None
+		if not rows:
+			# (first sheet: the saved sheet name may be the very thing that no longer fits)
+			known = _try_known_tabular(file_path, frappe._dict(file_type=fmt.file_type, sheet_name=None), customer)
+			if known:
+				header, rows = known
+				frappe.msgprint(
+					f"The saved layout of {customer} did not fit this file, so the layout was recognised from the file itself.",
+					alert=True,
+					indicator="orange",
+				)
+			else:
+				# nothing recognised: show the saved layout's own error
+				if fmt.layout == "Wide (Weekly Columns)":
+					header, rows = _parse_wide(file_path, fmt, customer)
+				else:
+					rows = _parse_tabular(file_path, fmt)
+					header = _default_header(customer, file_path)
 
 	if not rows:
 		frappe.throw("No valid schedule rows could be extracted from this file.")
@@ -170,8 +195,10 @@ def _parse_tabular(file_path, fmt):
 
 	header_row = (fmt.header_row or 1) - 1
 	if fmt.file_type == "Excel":
-		_require_xlrd(file_path)
+		engine = _require_xlrd(file_path)
 		read_kwargs = {"header": header_row}
+		if engine:
+			read_kwargs["engine"] = engine
 		if fmt.sheet_name:
 			read_kwargs["sheet_name"] = fmt.sheet_name
 		df = pd.read_excel(file_path, **read_kwargs)
@@ -325,13 +352,22 @@ def _default_header(customer, file_path):
 # ---------------------------------------------------------------------------
 
 def _require_xlrd(file_path):
-	"""pandas reads old .xls workbooks only through xlrd. Say so plainly
-	instead of letting the failure look like an unreadable layout."""
+	"""pandas reads old .xls workbooks through xlrd. Without it, python-calamine can read
+	them too (returned as the engine to use). With neither, say so plainly instead of
+	letting the failure look like an unreadable layout. Returns the engine name or None."""
 	if not str(file_path).lower().endswith(".xls"):
-		return
+		return None
 	try:
 		import xlrd  # noqa: F401
+
+		return None
 	except ImportError:
+		try:
+			import python_calamine  # noqa: F401
+
+			return "calamine"
+		except ImportError:
+			pass
 		frappe.throw(
 			"Old Excel files (.xls) need the xlrd package on the server. Run "
 			"<code>bench pip install xlrd</code> and restart, or save the file as .xlsx and upload that."
@@ -342,8 +378,10 @@ def _read_raw_no_header(file_path, fmt):
 	import pandas as pd
 
 	if fmt.file_type == "Excel":
-		_require_xlrd(file_path)
+		engine = _require_xlrd(file_path)
 		read_kwargs = {"header": None}
+		if engine:
+			read_kwargs["engine"] = engine
 		if fmt.sheet_name:
 			read_kwargs["sheet_name"] = fmt.sheet_name
 		raw = pd.read_excel(file_path, **read_kwargs)
@@ -471,8 +509,10 @@ def _rows_from_wide(raw, header_row_idx, fmt):
 
 	rows = []
 	starts = {}
-	first_col_date = str(min(d for _, d, _ in date_cols))
-	last_col_date = str(max(d for _, d, _ in date_cols))
+	# the sheet's first / last printed week; the "Past Due" column is dated today and is not one
+	week_dates = [d for idx, d, _ in date_cols if str(header_cells[idx]).strip().lower() != "past due"]
+	first_col_date = str(min(week_dates or [d for _, d, _ in date_cols]))
+	last_col_date = str(max(week_dates or [d for _, d, _ in date_cols]))
 	for row_idx in range(header_row_idx + 1, len(raw)):
 		row = list(raw.iloc[row_idx])
 		item_code = str(row[item_code_idx]).strip()
@@ -518,12 +558,24 @@ def _extract_pdf_text(file_path):
 		pdf_text = ""
 
 	if not pdf_text.strip():
+		# pdftotext is not installed (or gave nothing): rebuild the page layout with pdfminer,
+		# so the known-layout readers still recognise the file instead of sending it to the AI
 		try:
-			from pdfminer.high_level import extract_text
+			from schedule_planner.utils.pdf_text import pdfminer_layout_text
 
-			pdf_text = extract_text(file_path)
+			pdf_text = pdfminer_layout_text(file_path)
 		except ImportError:
 			frappe.throw("pdfminer.six is not installed. Run: bench pip install pdfminer.six")
+		except Exception:
+			pdf_text = ""
+
+		if not pdf_text.strip():
+			try:
+				from pdfminer.high_level import extract_text
+
+				pdf_text = extract_text(file_path)
+			except ImportError:
+				frappe.throw("pdfminer.six is not installed. Run: bench pip install pdfminer.six")
 
 	if not pdf_text.strip():
 		frappe.throw(
@@ -713,11 +765,17 @@ def _ensure_llm_configured(settings):
 	if settings.llm_provider == "Local (Ollama)":
 		# Self-hosted - no API key needed. A dummy value is still passed
 		# through to the caller so the shared HTTP-call code stays uniform.
-		return settings.get_password("llm_api_key") or "ollama"
+		return settings.get_password("llm_api_key", raise_exception=False) or "ollama"
 
-	api_key = settings.get_password("llm_api_key")
+	api_key = settings.get_password("llm_api_key", raise_exception=False)
 	if not api_key:
-		frappe.throw("Set an API Key in Schedule Planning Settings > AI-Based Schedule Extraction.")
+		frappe.throw(
+			"This file's layout was not recognised automatically, so it needs the AI - but no API key "
+			"is saved in Schedule Planning Settings > AI-Based Schedule Extraction. Enter the key and "
+			"save the settings. (Known layouts such as Matcor, Martinrea, Techform, Marwood and Mytox are "
+			"read without any key; if this is one of them, see the Error Log entry "
+			"'Schedule Planner: layout check failed'.)"
+		)
 
 	return api_key
 
@@ -943,7 +1001,11 @@ def _try_known_tabular(file_path, fmt, customer):
 	"""Weekly-column ("Wide") sheets and plain Long tables are recognised from
 	their headers and read by the deterministic parsers - no AI. Returns
 	(header, rows) or None when nothing recognisable is found (the caller then
-	falls back to AI extraction). Never raises."""
+	falls back to AI extraction). Never raises, except to say that the xlrd package
+	is missing for an old .xls file (that is a server fix, not something the AI can solve)."""
+
+	if fmt.file_type == "Excel":
+		_require_xlrd(file_path)
 
 	try:
 		raw = _read_raw_no_header(file_path, fmt)
@@ -981,6 +1043,8 @@ def _try_known_tabular(file_path, fmt, customer):
 				frappe.msgprint("Recognised a one-row-per-date layout. Read without AI.", alert=True, indicator="green")
 				return _default_header(customer, file_path), rows
 	except Exception:
+		# leave the reason in the Error Log, otherwise a failure here only shows up as "goes to the AI"
+		frappe.log_error(title="Schedule Planner: layout check failed", message=frappe.get_traceback())
 		return None
 	return None
 

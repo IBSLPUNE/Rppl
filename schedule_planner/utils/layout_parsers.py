@@ -325,14 +325,15 @@ def parse_techform_acs(text):
 # under two POs, so rows are read per (part, PO) and merged afterwards. Only
 # non-zero releases are listed, and the due date is the last date on the line.
 
-_MARWOOD_PART = re.compile(r"^(P\w*)\s+(\d{5,7})\s+.*?\bPlant\s+(\S+)")
+_MARWOOD_PART = re.compile(r"^\s*(P\w*)\s+(\d{5,7})\s+.*?\bPlant\s+(\S+)")
 _MARWOOD_ROW = re.compile(
 	r"\b(Firm|Forecast)\s+([\d,]+)\s+[\d,]+\s*pcs\s+[\d,]+\(\d+\)\s*pcs\s+([\d,]+)\b"
 )
 
 
 def detect_marwood_plex(text):
-	return "ONLINE RELEASES TO SUPPLIERS" in text and "Release" in text
+	# the title is printed in wide letters, so words can be separated by several spaces
+	return "ONLINE RELEASES TO SUPPLIERS" in " ".join(text.split()) and "Release" in text
 
 
 def parse_marwood_plex(text):
@@ -388,7 +389,8 @@ def parse_marwood_plex(text):
 # PAST-DUE is already-due quantity: immediate Firm, dated today.
 
 def detect_mytox_mrr(text):
-	return "MATERIAL REQUIREMENTS RELEASE" in text and "PART # :" in text and "QTY :" in text
+	flat = " ".join(text.split())  # spacing between words varies with how the text was read
+	return "MATERIAL REQUIREMENTS RELEASE" in flat and "PART # :" in flat and "QTY :" in flat
 
 
 def parse_mytox_mrr(text, today=None):

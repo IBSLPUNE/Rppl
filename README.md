@@ -606,3 +606,6 @@ The end date of the forecast is unchanged: each item's first date + the total mo
 ### Forecast dialog: months in brackets
 - After each item's **Range** the months of data in the file are shown in brackets, e.g. `(2.5)` or `(4)`: first date to last date, the last week counted in full, 30.4375 days to a month.
 - Under the two auto-forecast qty columns the bracket is `(figure, months)`, e.g. `(45,000, 2.5)`: the figure behind the forecast and how many months of auto forecast it covers (weekly rows x 7 / 30.4375). When nothing is forecast only the figure is shown.
+
+### PDF text reading (why a known layout can still go to the AI)
+Known PDF layouts (Martinrea, Techform, Marwood, Mytox) are recognised from the text of the PDF with its columns kept. The server uses `pdftotext -layout` (package `poppler-utils`) for this. If `pdftotext` is not installed, the schedule planner rebuilds the page layout itself with `pdfminer.six` (`utils/pdf_text.py`), and the known-layout readers give the same rows as with `pdftotext` (checked file by file on the sample PDFs). Layout detection ignores the number of spaces between words, because some prints space out titles such as "ONLINE   RELEASES   TO   SUPPLIERS". Installing poppler is still recommended: `sudo apt install poppler-utils`.
