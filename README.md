@@ -609,3 +609,7 @@ The end date of the forecast is unchanged: each item's first date + the total mo
 
 ### PDF text reading (why a known layout can still go to the AI)
 Known PDF layouts (Martinrea, Techform, Marwood, Mytox) are recognised from the text of the PDF with its columns kept. The server uses `pdftotext -layout` (package `poppler-utils`) for this. If `pdftotext` is not installed, the schedule planner rebuilds the page layout itself with `pdfminer.six` (`utils/pdf_text.py`), and the known-layout readers give the same rows as with `pdftotext` (checked file by file on the sample PDFs). Layout detection ignores the number of spaces between words, because some prints space out titles such as "ONLINE   RELEASES   TO   SUPPLIERS". Installing poppler is still recommended: `sudo apt install poppler-utils`.
+
+### Marwood (Plex) part numbers and release lines
+- The "Material Code or Part-Revision" column is narrow in some prints: a 10-character code such as `SC00000323` is printed as `SC0000032` with the last character on the next line. The reader joins them (or takes the full code from the "Supplier Part No" column next to it), so the part number is always the complete one.
+- Release lines come in two widths (`Firm 16,000 0 pcs ...` and `Firm 2,600 pcs 0 pcs ...`). Both are read, and every line that has a status and a quantity must be read: if one has a form the reader does not know, the file goes to the AI instead of silently losing the line. The sum of the balances on the page is the check (e.g. 11.16.26 release: 117 lines, 1,588,050).

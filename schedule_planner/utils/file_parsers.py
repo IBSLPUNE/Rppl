@@ -141,6 +141,23 @@ def _get_or_create_format(customer, file_type):
 				alert=True,
 				indicator="orange",
 			)
+			# Really use the uploaded file's type, with auto-detection, for this upload only.
+			# (The saved format stays as it is: it describes the customer's usual file, and a
+			# layout learned from this odd file must not be written onto it.)
+			return frappe._dict(
+				name=fmt.name,
+				customer=fmt.customer,
+				file_type=file_type,
+				parsing_mode="LLM Extraction",
+				layout="Long",
+				header_row=1,
+				sheet_name=None,
+				pdf_parser_key=None,
+				item_code_column=None,
+				item_name_column=None,
+				column_mapping=[],
+				type_mismatch=1,
+			)
 		return fmt
 
 	fmt = frappe.get_doc(
@@ -1197,6 +1214,8 @@ def _rows_roughly_match(det_rows, llm_rows):
 
 
 def _try_verify_layout_and_upgrade(file_path, fmt, layout, llm_rows):
+	if fmt.get("type_mismatch"):
+		return  # a file of another type than the customer's saved format: learn nothing from it
 	if not layout or not layout.get("item_code_column") and not layout.get("column_mapping"):
 		return
 

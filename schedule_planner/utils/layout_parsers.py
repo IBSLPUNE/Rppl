@@ -326,9 +326,31 @@ def parse_techform_acs(text):
 # non-zero releases are listed, and the due date is the last date on the line.
 
 _MARWOOD_PART = re.compile(r"^\s*(P\w*)\s+(\d{5,7})\s+.*?\bPlant\s+(\S+)")
+# "Firm 16,000 0 pcs 0(0)pcs 16,000" or, in a wider print, "Firm 2,600 pcs 0 pcs 0(0)pcs 2,600 pcs"
 _MARWOOD_ROW = re.compile(
-	r"\b(Firm|Forecast)\s+([\d,]+)\s+[\d,]+\s*pcs\s+[\d,]+\(\d+\)\s*pcs\s+([\d,]+)\b"
+	r"\b(Firm|Forecast)\s+([\d,]+)(?:\s*pcs)?\s+[\d,]+\s*pcs\s+[\d,]+\(\d+\)\s*pcs\s+([\d,]+)\b"
 )
+# any release line at all: a status followed by a quantity - every one of them must be read
+_MARWOOD_ANY = re.compile(r"\b(Firm|Forecast)\s+[\d,]+")
+
+
+def _marwood_code(part, line, next_line):
+	"""The part number of a Marwood line. The "Material Code or Part-Revision" column is
+	narrow in some prints: a long code is cut after 9 characters and its last character(s)
+	wrap onto the next line (SC00000323 is printed "SC0000032" and "3" below it). The
+	"Supplier Part No" column next to it carries the full code when there is one;
+	otherwise the wrapped character sits right under the start of the cut code."""
+	code = part.group(3)
+	start = line.find(code, part.start(3))
+	after = line[start + len(code):].split()
+	if after and after[0].startswith(code) and len(after[0]) > len(code):
+		return after[0]  # the Supplier Part No holds the complete code
+	if len(code) >= 9:
+		building = line.split()[0]
+		for tok in re.finditer(r"\S+", next_line):
+			if tok.start() == start and len(tok.group()) <= 3 and tok.group() != building:
+				return code + tok.group()
+	return code
 
 
 def detect_marwood_plex(text):
@@ -347,14 +369,17 @@ def parse_marwood_plex(text):
 	vendor = re.search(r"Supplier\s+(\S+)", text)
 
 	rows, current, name, loose = [], None, {}, 0
-	for line in text.splitlines():
+	lines = text.splitlines()
+	for idx, line in enumerate(lines):
 		part = _MARWOOD_PART.match(line)
 		if part:
-			current = part.group(3)
+			current = _marwood_code(part, line, lines[idx + 1] if idx + 1 < len(lines) else "")
 			if planner:
 				m = re.search(rf"{planner.group(1)}\s+(.+?)\s+(?:{_DATE}|\d)", line)
 				if m and current not in name:
 					name[current] = m.group(1).strip()
+		if _MARWOOD_ANY.search(line) and not _MARWOOD_ROW.search(line):
+			return None  # a release line in a form we do not know: never drop it silently
 		if _MARWOOD_ROW.search(line):
 			loose += 1
 			dates = re.findall(_DATE, line)
