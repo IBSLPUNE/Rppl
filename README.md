@@ -30,14 +30,14 @@ be created by hand in the UI.
    - If a date/item combination already has a submitted Sales Order from an
      earlier schedule and the quantity changed, that SO is **cancelled and
      amended** rather than duplicated.
-   - **Rate rule:** an order is submitted only when every item on it has a
-     rate (Item > Standard Selling Rate, or the customer's USD etc. price
-     list). If even one item has no rate the order is saved as a **Draft**
-     and a message lists the order and the items with no rate. Set the rate on
-     the order and submit it. A later schedule for the same date updates that
-     Draft in place (rates typed into it are kept) and submits it once every
-     rate is there; a submitted order that gets amended keeps the rate it
-     already had when the item's own rate is empty.
+   - **Sales Orders stay Draft.** The system creates them but never submits
+     them: review each order (a message lists them, and any item with no rate
+     - Item > Standard Selling Rate, or the customer's USD etc. price list) and
+     submit them by hand. A later schedule for the same date updates that
+     Draft in place (rates typed into it are kept). Only an order that was
+     already submitted earlier is cancelled and amended; the amended one is
+     again a Draft and keeps the rate the old one had when the item's own
+     rate is empty.
    - Forecast/Raw rows -> the customer's **Sales Forecast is wholesale
      replaced** (cancel + amend) - a new schedule makes the old forecast
      horizon obsolete.

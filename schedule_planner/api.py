@@ -536,8 +536,8 @@ def create_schedule_with_forecast(
 			f"Schedule {schedule_doc.name} created as Draft. {available_months} month(s) "
 			f"from the file + {auto_months} month(s) auto-forecast using "
 			f"{forecast_engine.METHOD_LABELS[forecast_method]}. Review and Submit "
-			f"when ready - Submitting is what creates the Sales Order(s), Sales "
-			f"Forecast and (if enabled) Material Request."
+			f"when ready - Submitting creates the Sales Order(s) as Draft (you submit them "
+			f"yourself), the Sales Forecast and (if enabled) the Material Request."
 		),
 	}
 

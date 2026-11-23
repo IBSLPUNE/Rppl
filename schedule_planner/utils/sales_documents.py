@@ -153,10 +153,10 @@ def _item_uom(item_code):
 # ---------------------------------------------------------------------------
 
 def sync_firm_to_sales_orders(doc):
-	"""One Sales Order per delivery date. An order whose items ALL have a rate
-	is submitted; if even one item has no rate (0) the order is saved as a
-	Draft so nothing is committed at a zero price - set the rate and submit it
-	by hand, or let the next schedule for that date do it once the rates exist."""
+	"""One Sales Order per delivery date. Every order is left as a DRAFT: it is
+	created / updated here but never submitted by the system - the user reviews
+	it (and sets any missing rate) and submits it by hand. A later schedule for
+	the same date updates the Draft in place."""
 	firm_rows = [r for r in doc.schedule_items if r.demand_type == "Firm" and flt(r.quantity) > 0]
 	if not firm_rows:
 		return
@@ -180,17 +180,23 @@ def _report_draft_orders(report):
 	if not drafts:
 		return
 	lines = "<br>".join(
-		f"<a href='/app/sales-order/{name}'>{name}</a> ({frappe.utils.escape_html(str(date))}): "
-		f"no rate for {frappe.utils.escape_html(', '.join(missing))}"
+		f"<a href='/app/sales-order/{name}'>{name}</a> ({frappe.utils.escape_html(str(date))})"
+		+ (f": no rate for {frappe.utils.escape_html(', '.join(missing))}" if missing else "")
 		for name, date, missing in drafts
+	)
+	no_rate = sum(1 for _n, _d, missing in drafts if missing)
+	extra = (
+		f"<br><br>{no_rate} of them have an item without a rate (Item &gt; Standard Selling Rate is empty or 0) - "
+		"set the rate on the order before submitting."
+		if no_rate
+		else ""
 	)
 	frappe.msgprint(
 		(
-			"<b>{0}</b> Sales Order(s) were saved as <b>Draft</b> because one or more items have no rate "
-			"(Item &gt; Standard Selling Rate is empty or 0). {1} Sales Order(s) with every rate present were submitted."
-			"<br><br>{2}<br><br>Set the rate on the order (or on the Item) and submit it."
-		).format(len(drafts), len(report["submitted"]), lines),
-		title="Sales Orders Left as Draft",
+			"<b>{0}</b> Sales Order(s) were created / updated as <b>Draft</b>. Review them and submit when ready."
+			"<br><br>{1}{2}"
+		).format(len(drafts), lines, extra),
+		title="Sales Orders Saved as Draft",
 		indicator="orange",
 	)
 
@@ -200,13 +206,10 @@ def _missing_rate_items(so):
 
 
 def _finish_sales_order(so, delivery_date, report):
-	"""The order is already inserted: submit it only when every line has a rate."""
-	missing = _missing_rate_items(so)
-	if missing:
-		report["draft"].append((so.name, delivery_date, sorted(set(missing))))
-		return so.name
-	so.submit()
-	report["submitted"].append(so.name)
+	"""The order is already inserted. It stays a Draft: the system never submits a
+	Sales Order (the client submits them by hand). Lines with no rate are only
+	reported so the user can fix them before submitting."""
+	report["draft"].append((so.name, delivery_date, sorted(set(_missing_rate_items(so)))))
 	return so.name
 
 
@@ -230,9 +233,8 @@ def _sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, rep
 	existing_name, existing_status = (existing[0], existing[1]) if existing else (None, None)
 
 	if existing_name and existing_status == 0:
-		# still a Draft (an earlier schedule found an item without a rate): keep it,
-		# bring its lines up to this schedule, keep any rate that was typed in, and
-		# submit it now if every line has a rate
+		# still a Draft (Sales Orders are always left as Draft): keep it, bring its
+		# lines up to this schedule and keep any rate that was typed in
 		so_name = _update_draft_sales_order(existing_name, doc, delivery_date, new_items, company, warehouse, report)
 	elif existing_name:
 		existing_items = {
