@@ -27,17 +27,26 @@ be created by hand in the UI.
    everything downstream:
    - Firm rows -> **one Sales Order per delivery date** (multiple items,
      one date, per SO).
-   - If a date/item combination already has a submitted Sales Order from an
-     earlier schedule and the quantity changed, that SO is **cancelled and
-     amended** rather than duplicated.
    - **Sales Orders stay Draft.** The system creates them but never submits
      them: review each order (a message lists them, and any item with no rate
      - Item > Standard Selling Rate, or the customer's USD etc. price list) and
-     submit them by hand. A later schedule for the same date updates that
-     Draft in place (rates typed into it are kept). Only an order that was
-     already submitted earlier is cancelled and amended; the amended one is
-     again a Draft and keeps the rate the old one had when the item's own
-     rate is empty.
+     submit them by hand.
+   - A later schedule for the same customer and date **updates the Draft in
+     place** (items and quantities follow the new schedule; a rate typed into
+     the Draft is kept). Do not edit a schedule-generated Draft by hand - the
+     next schedule overwrites its lines.
+   - A **submitted** Sales Order is handled by what has happened to it:
+     - items and quantities already match the schedule -> nothing happens;
+     - they differ and the order is **not processed yet** -> it is cancelled
+       and replaced by a Draft that follows the schedule (a message lists
+       old -> new);
+     - they differ but the order is **processed** (partly or fully delivered
+       or billed, closed / on hold, or a Delivery Note, Sales Invoice, Work
+       Order, Pick List, Material Request, Purchase Order or advance payment
+       points at it), or ERPNext refuses the cancel -> it is left exactly as
+       it is and a message lists it, so it can be amended by hand.
+   - Only Sales Orders created by this app are ever looked at. Any other Sales
+     Order is untouched.
    - Forecast/Raw rows -> the customer's **Sales Forecast is wholesale
      replaced** (cancel + amend) - a new schedule makes the old forecast
      horizon obsolete.
@@ -571,8 +580,10 @@ schedule_planner/
 Test the full loop on a staging site first: upload one customer's real
 schedule file, walk through Draft -> Submit, confirm the Sales Order(s) and
 Sales Forecast look right, then upload that same customer's *next* schedule
-with a couple of quantities changed and confirm the previous SO/Forecast get
-cancelled and amended rather than duplicated, and that Revision Log /
+with a couple of quantities changed and confirm the Draft Sales Order is
+updated, a submitted-but-unprocessed one is replaced by a Draft, a processed
+one is left untouched and listed in a message, and the
+Sales Forecast is cancelled and amended rather than duplicated, and that Revision Log /
 Customer Revision Stats pick up the change.
 
 Also test the Material Request side specifically, since it's the part

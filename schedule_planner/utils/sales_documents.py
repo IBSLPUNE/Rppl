@@ -3,9 +3,11 @@
 
 """Turns a submitted Customer Schedule's Firm rows into per-delivery-date
 Sales Orders, and its Forecast/Raw rows into one Sales Forecast per
-customer - amending (cancel + copy + resubmit) the existing document instead
-of creating a duplicate whenever a new schedule changes what a date/item
-already committed to.
+customer. Sales Orders are only ever created or updated as DRAFTS. A submitted
+Sales Order that nothing has been done with yet (no delivery, invoice, work
+order, ...) is cancelled and replaced by a Draft when a new schedule changes it;
+one that has been processed is never touched. (The Sales Forecast is amended -
+cancel + copy + resubmit - when a new schedule replaces it.)
 
 NOTE on the "Sales Forecast" doctype: this module assumes the same field
 names the client's original prototype used against their live site
@@ -155,8 +157,16 @@ def _item_uom(item_code):
 def sync_firm_to_sales_orders(doc):
 	"""One Sales Order per delivery date. Every order is left as a DRAFT: it is
 	created / updated here but never submitted by the system - the user reviews
-	it (and sets any missing rate) and submits it by hand. A later schedule for
-	the same date updates the Draft in place."""
+	it (and sets any missing rate) and submits it by hand.
+
+	- A Draft for that customer + date is updated in place to match this schedule.
+	- A SUBMITTED order whose items / qty already match the schedule is left alone.
+	  If they differ: when nothing has been done with it yet (_is_processed) it is
+	  cancelled and replaced by a Draft that follows the schedule; when it has been
+	  processed (delivered, invoiced, work order, ...) or cannot be cancelled it is
+	  left exactly as it is and listed in a message.
+	- Only orders this app created (custom_sp_is_schedule_generated = 1) are ever
+	  looked at; any other Sales Order is untouched."""
 	firm_rows = [r for r in doc.schedule_items if r.demand_type == "Firm" and flt(r.quantity) > 0]
 	if not firm_rows:
 		return
@@ -168,7 +178,7 @@ def sync_firm_to_sales_orders(doc):
 	for row in firm_rows:
 		by_date[str(row.delivery_date)].append(row)
 
-	report = {"submitted": [], "draft": []}
+	report = {"submitted": [], "draft": [], "locked": [], "replaced": []}
 	for delivery_date, rows_for_date in by_date.items():
 		_sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, report)
 
@@ -177,6 +187,40 @@ def sync_firm_to_sales_orders(doc):
 
 def _report_draft_orders(report):
 	drafts = report["draft"]
+	locked = report.get("locked", [])
+	replaced = report.get("replaced", [])
+	if replaced:
+		frappe.msgprint(
+			(
+				"<b>{0}</b> submitted Sales Order(s) had not been processed yet, so they were <b>cancelled</b> and "
+				"replaced by a <b>Draft</b> that follows this schedule:<br><br>{1}"
+			).format(
+				len(replaced),
+				"<br>".join(
+					f"<a href='/app/sales-order/{old}'>{old}</a> &rarr; <a href='/app/sales-order/{new}'>{new}</a> "
+					f"({frappe.utils.escape_html(str(date))})"
+					for old, new, date in replaced
+				),
+			),
+			title="Sales Orders Replaced",
+			indicator="orange",
+		)
+	if locked:
+		frappe.msgprint(
+			(
+				"<b>{0}</b> date(s) already have a <b>submitted</b> Sales Order that does not match this schedule and "
+				"has already been processed (delivery, invoice, work order, advance payment, closed or on hold), or could "
+				"not be cancelled. They were <b>not changed</b>:<br><br>{1}<br><br>Amend them by hand if needed."
+			).format(
+				len(locked),
+				"<br>".join(
+					f"<a href='/app/sales-order/{name}'>{name}</a> ({frappe.utils.escape_html(str(date))})"
+					for name, date in locked
+				),
+			),
+			title="Submitted Sales Orders Left Unchanged",
+			indicator="red",
+		)
 	if not drafts:
 		return
 	lines = "<br>".join(
@@ -213,43 +257,81 @@ def _finish_sales_order(so, delivery_date, report):
 	return so.name
 
 
+# documents that mean a Sales Order has been acted on; (doctype, field holding the Sales Order)
+_SO_FOLLOW_UPS = (
+	("Delivery Note Item", "against_sales_order"),
+	("Sales Invoice Item", "sales_order"),
+	("Work Order", "sales_order"),
+	("Pick List Item", "sales_order"),
+	("Material Request Item", "sales_order"),
+	("Purchase Order Item", "sales_order"),
+	("Payment Entry Reference", "reference_name"),  # advance received against the order
+)
+
+
+def _is_processed(so_name):
+	"""True when anything has been done with this Sales Order after it was
+	submitted - delivered / billed in part or full, closed or put on hold, or any
+	(not cancelled) Delivery Note, Invoice, Work Order, Pick List, Material
+	Request, Purchase Order or advance payment points at it. Such an order must
+	never be cancelled by the system."""
+	row = frappe.db.get_value("Sales Order", so_name, ["status", "per_delivered", "per_billed"], as_dict=True)
+	if not row:
+		return True
+	if row.status in ("Closed", "On Hold") or flt(row.per_delivered) > 0 or flt(row.per_billed) > 0:
+		return True
+	for doctype, field in _SO_FOLLOW_UPS:
+		if not frappe.db.table_exists(doctype) or not frappe.get_meta(doctype).has_field(field):
+			continue
+		filters = {field: so_name, "docstatus": ["<", 2]}
+		if doctype == "Payment Entry Reference":
+			filters["reference_doctype"] = "Sales Order"
+		if frappe.db.exists(doctype, filters):
+			return True
+	return False
+
+
 def _sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, report=None):
-	report = report if report is not None else {"submitted": [], "draft": []}
+	report = report if report is not None else {"submitted": [], "draft": [], "locked": []}
+	report.setdefault("locked", [])
+	report.setdefault("replaced", [])
 	new_items = {}
 	for row in rows_for_date:
 		new_items[row.item_code] = flt(new_items.get(row.item_code, 0)) + flt(row.quantity)
 
-	existing = frappe.db.get_value(
-		"Sales Order",
-		{
-			"customer": doc.customer,
-			"custom_sp_is_schedule_generated": 1,
-			"custom_sp_delivery_date": delivery_date,
-			"docstatus": ["in", [0, 1]],
-		},
-		["name", "docstatus"],
-		order_by="creation desc",
-	)
-	existing_name, existing_status = (existing[0], existing[1]) if existing else (None, None)
-
-	if existing_name and existing_status == 0:
-		# still a Draft (Sales Orders are always left as Draft): keep it, bring its
-		# lines up to this schedule and keep any rate that was typed in
-		so_name = _update_draft_sales_order(existing_name, doc, delivery_date, new_items, company, warehouse, report)
-	elif existing_name:
-		existing_items = {
-			r.item_code: flt(r.qty)
-			for r in frappe.get_all(
-				"Sales Order Item", filters={"parent": existing_name}, fields=["item_code", "qty"]
-			)
-		}
-		if existing_items == new_items:
-			for row in rows_for_date:
-				row.linked_sales_order = existing_name
-			return
-		so_name = _amend_sales_order(existing_name, doc, delivery_date, new_items, company, warehouse, report)
+	# only Sales Orders this app made for this customer and date are ever looked at
+	match = {
+		"customer": doc.customer,
+		"custom_sp_is_schedule_generated": 1,
+		"custom_sp_delivery_date": delivery_date,
+	}
+	draft = frappe.db.get_value("Sales Order", dict(match, docstatus=0), "name", order_by="creation desc")
+	if draft:
+		# a Draft: bring its lines up to this schedule, keep any rate that was typed in
+		so_name = _update_draft_sales_order(draft, doc, delivery_date, new_items, company, warehouse, report)
 	else:
-		so_name = _create_sales_order(doc, delivery_date, new_items, company, warehouse, report)
+		submitted = frappe.db.get_value("Sales Order", dict(match, docstatus=1), "name", order_by="creation desc")
+		if submitted:
+			existing_items = {
+				r.item_code: flt(r.qty)
+				for r in frappe.get_all(
+					"Sales Order Item", filters={"parent": submitted}, fields=["item_code", "qty"]
+				)
+			}
+			if existing_items == new_items:
+				for row in rows_for_date:
+					row.linked_sales_order = submitted
+				return
+			# differs from the schedule: replace it only if nothing has been done with it yet
+			if _is_processed(submitted):
+				report["locked"].append((submitted, delivery_date))
+				return
+			so_name = _amend_sales_order(submitted, doc, delivery_date, new_items, company, warehouse, report)
+			if not so_name:  # could not be cancelled (a link ERPNext knows about): left as it is
+				report["locked"].append((submitted, delivery_date))
+				return
+		else:
+			so_name = _create_sales_order(doc, delivery_date, new_items, company, warehouse, report)
 
 	for row in rows_for_date:
 		row.linked_sales_order = so_name
@@ -333,7 +415,13 @@ def _amend_sales_order(existing_name, doc, delivery_date, new_items, company, wa
 			old_rates.setdefault(line.item_code, flt(line.rate))
 	if old_so.docstatus == 1:
 		old_so.flags.ignore_permissions = True
-		old_so.cancel()
+		frappe.db.savepoint("sp_cancel_so")
+		try:
+			old_so.cancel()
+		except frappe.ValidationError:
+			# ERPNext found something still linked to it: leave the order exactly as it was
+			frappe.db.rollback(save_point="sp_cancel_so")
+			return None
 
 	amended = frappe.copy_doc(old_so)
 	amended.amended_from = existing_name
@@ -351,6 +439,7 @@ def _amend_sales_order(existing_name, doc, delivery_date, new_items, company, wa
 	_append_so_items(amended, new_items, warehouse, delivery_date, ctx, fallback_rates=old_rates)
 
 	amended.insert(ignore_permissions=True)
+	report.setdefault("replaced", []).append((existing_name, amended.name, delivery_date))
 	return _finish_sales_order(amended, delivery_date, report)
 
 
