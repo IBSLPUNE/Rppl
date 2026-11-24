@@ -237,6 +237,7 @@ seen (or if a known layout stops adding up - see below).
 | Techform / Magna portal print | "Planning Schedules", "Release Number:", "Issue Date:" | Firm = Firm; Forecast and Raw = Forecast |
 | Marwood / Plex | "ONLINE RELEASES TO SUPPLIERS" (no release number is printed, so the print time becomes `PLEX-yyyymmdd-hhmm`); one part under two POs is added up | per line Firm / Forecast |
 | Mytox | "MATERIAL REQUIREMENTS RELEASE": dates up to "Daily quantities end" are Firm, weekly and monthly buckets are Forecast; PAST-DUE is Firm dated today | see left |
+| Customer Release Schedule (e.g. New Standard Corporation, one part per page) | "CUSTOMER RELEASE SCHEDULE", "Due at Dock", "PO Number"; table of numbered releases with a total line (checked against the table and the Total Quantity box). No release number or date is printed, so the release is `<PO>-<6-character fingerprint of the releases>` (same file twice = duplicate; a revised list = new schedule) and the schedule date is the upload day | all Firm |
 | Excel / CSV, weekly columns (e.g. Matcor) | a header row with a Part / PN column and 3+ date columns, Firm/Forecast band above | from the band row |
 | Excel / CSV, one row per date | Part, Date and Qty column headings in the first 10 rows | Demand Type column, else Forecast |
 
@@ -554,7 +555,7 @@ schedule_planner/
                                       Material Request / Material Request Item
   utils/
     file_parsers.py                  PDF/Excel/CSV -> row dicts (hybrid parsing)
-    layout_parsers.py                known customer layouts read without AI (Martinrea, Techform, Marwood, Mytox, weekly-column Excel)
+    layout_parsers.py                known customer layouts read without AI (Martinrea, Techform, Marwood, Mytox, Customer Release Schedule, weekly-column Excel)
     forecast_engine.py               the auto-forecast methods (4 weeks, 3/6/9-month shipping) + extension logic
     sales_documents.py               SO per-date + amendment, SF wholesale replace
     material_request.py              live Auto MR reconciler + planning snapshot

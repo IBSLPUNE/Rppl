@@ -19,7 +19,7 @@ authorisations are treated as Forecast (client decision). Mytox prints no
 label at all, so its daily quantities are Firm and weekly/monthly are Forecast.
 
 Known layouts: martinrea_cms (Martinrea Canada and Riverside), techform_portal,
-techform_acs (Techform PO064R spool print), marwood_plex, mytox_mrr. Excel/CSV layouts are auto-detected in file_parsers.py.
+techform_acs (Techform PO064R spool print), marwood_plex, mytox_mrr, customer_release_schedule. Excel/CSV layouts are auto-detected in file_parsers.py.
 """
 
 import re
@@ -504,6 +504,121 @@ def parse_mytox_mrr(text, today=None):
 
 
 # ---------------------------------------------------------------------------
+# "CUSTOMER RELEASE SCHEDULE" (New Standard Corporation / Volvo part release list)
+# ---------------------------------------------------------------------------
+# One page per part: a header block (Customer, PO Number, Part Number ...) and a
+# table of numbered releases - Release / Due at Dock / Part Number / Description /
+# Quantity - closed by a total line. Dates are written out ("September 22, 2026").
+# No Firm/Forecast label and no issue date are printed: every release is a dated
+# purchase-order release, so it is Firm, and the print date is today. The table is
+# reconciled with its own total line (and the "Total Quantity" box) before it is
+# trusted.
+
+_CRS_DATE = r"(?:January|February|March|April|May|June|July|August|September|October|November|December|" \
+	r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2},\s+\d{4}"
+_CRS_ROW = re.compile(
+	rf"^\s*(\d+)\s+({_CRS_DATE})\s+(\S+)\s+(.+?)\s+([\d,]+(?:\.\d+)?)\s*([A-Za-z]+)\s*$"
+)
+_CRS_LOOSE = re.compile(rf"^\s*\d+\s+{_CRS_DATE}")
+_CRS_TOTAL = re.compile(r"^\s*([\d,]+(?:\.\d+)?)\s*[A-Za-z]+\s*$")
+
+
+def _crs_date(text):
+	from datetime import datetime
+
+	cleaned = re.sub(r"\s+", " ", text.replace(".", "")).strip()
+	for fmt in ("%B %d, %Y", "%b %d, %Y"):
+		try:
+			return datetime.strptime(cleaned.replace("Sept ", "Sep "), fmt).date()
+		except ValueError:
+			continue
+	raise ValueError(text)
+
+
+def _crs_fingerprint(rows):
+	import hashlib
+
+	key = "|".join(f"{r['item_code']}:{r['delivery_date']}:{r['quantity']:g}" for r in sorted(rows, key=lambda r: (r["item_code"], r["delivery_date"])))
+	return hashlib.sha1(key.encode()).hexdigest()[:6].upper()
+
+
+def detect_customer_release_schedule(text):
+	flat = " ".join(text.split())  # spacing between words varies with how the text was read
+	return "CUSTOMER RELEASE SCHEDULE" in flat and "Due at Dock" in flat
+
+
+def parse_customer_release_schedule(text, today=None):
+	if today is None:
+		from frappe.utils import getdate
+
+		today = getdate()
+
+	# the footer ("Release schedule for PO P77558") is always one line; the header cell
+	# "PO Number" can wrap onto two lines
+	po = re.search(r"Release schedule for PO\s+(\S+)", text) or re.search(r"PO\s+Number\s+(\S+)", text)
+	if not po:
+		return None
+	customer = re.search(r"^\s*Customer\s+(.+?)(?:\s{2,}|$)", text, re.M)
+
+	rows, starts, horizon = [], {}, None
+	parsed_lines = loose_lines = 0
+	totals, boxes = [], []  # table total lines / the "Total Quantity" box of each page
+	for page in text.split("\f"):
+		in_table = table_seen = False
+		for line in page.splitlines():
+			if re.search(r"\bRelease\b.*\bDue at Dock\b", line):
+				in_table = table_seen = True
+				continue
+			if not table_seen:
+				# above the table: the header block, whose last quantity is the page's total
+				m = re.search(r"\s{2,}([\d,]+(?:\.\d+)?)\s*[A-Za-z]+\s*$", line)
+				if m:
+					boxes.append(_num(m.group(1)))
+				continue
+			if not in_table:
+				continue
+			if _CRS_LOOSE.match(line):
+				loose_lines += 1
+				m = _CRS_ROW.match(line)
+				if not m:
+					return None  # a release line this reader cannot read: do not guess
+				parsed_lines += 1
+				when = _crs_date(m.group(2))
+				qty = _num(m.group(5))
+				code = m.group(3)
+				_seen(starts, code, when)
+				horizon = when if horizon is None or when > horizon else horizon
+				if qty > 0:
+					rows.append(_row(code, m.group(4).strip(), when, qty, "Firm"))
+				continue
+			m = _CRS_TOTAL.match(line)
+			if m:
+				totals.append(_num(m.group(1)))
+				in_table = False  # the closing total ends this page's table
+
+	if not rows or parsed_lines != loose_lines:
+		return None
+	# every printed total has to agree with the releases above it
+	grand = sum(r["quantity"] for r in rows)
+	if not totals or abs(sum(totals) - grand) > 0.5:
+		return None
+	if boxes and abs(sum(boxes) - grand) > 0.5:
+		return None
+
+	_stamp(rows, starts)
+	header = {
+		# no release number or date is printed: the PO number plus a short fingerprint of the
+		# releases, so the same file twice is caught as a duplicate but a revised release list
+		# for the same PO is accepted as a new schedule
+		"release_number": f"{po.group(1)}-{_crs_fingerprint(rows)}"[:140],
+		"supplier_vendor": customer.group(1).strip() if customer else "",
+		"schedule_date": str(today),
+		"horizon_end": str(horizon) if horizon else None,
+	}
+	return header, _merge(rows)
+
+
+# ---------------------------------------------------------------------------
 # Registry + dispatcher
 # ---------------------------------------------------------------------------
 
@@ -513,6 +628,7 @@ KNOWN_PDF_LAYOUTS = [
 	("techform_acs", "Techform vendor planning schedule (PO064R)", detect_techform_acs, parse_techform_acs),
 	("marwood_plex", "Marwood / Plex online release", detect_marwood_plex, parse_marwood_plex),
 	("mytox_mrr", "Mytox material requirements release", detect_mytox_mrr, parse_mytox_mrr),
+	("customer_release_schedule", "Customer release schedule (PO release list)", detect_customer_release_schedule, parse_customer_release_schedule),
 ]
 
 
