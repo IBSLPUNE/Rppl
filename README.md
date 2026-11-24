@@ -255,6 +255,16 @@ rolled off the front are not logged as "removed".
 
 Excel `.xls` (old format) needs the `xlrd` package: `bench pip install xlrd`.
 
+## Sales UOM (Nos in the schedule, Metres on the order)
+
+Customer schedules are read in the item's **Stock UOM** (e.g. Nos). When the Item has a different
+**Sales UOM** (e.g. M) *and* a row for it in the Item's UOM Conversion table, the Sales Order line is
+written in the Sales UOM with that conversion factor: `qty = schedule qty / factor`, `stock_qty = schedule qty`,
+and the rate is per Sales UOM (`standard_rate x factor`). If the Item has no Sales UOM, or no conversion row
+for it, the line stays in the Stock UOM - the app never guesses a factor. Quantity comparisons (is a submitted
+order already up to date?) are always made in Stock UOM. A Draft written by an older version with the wrong
+quantity is corrected on the next schedule upload.
+
 ## Customers billed in a foreign currency
 
 Sales Orders created from a schedule use the customer's own currency (the

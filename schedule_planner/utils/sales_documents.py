@@ -58,22 +58,46 @@ def _default_warehouse(company):
 	return warehouse
 
 
-def _item_rate(item_code, ctx=None):
-	"""Selling rate in the Sales Order's own currency. Item.standard_rate is
-	kept in company currency, so for a foreign-currency customer a rate from
-	the customer's Selling Price List (in that currency) is preferred, and
-	otherwise standard_rate is converted with the order's exchange rate."""
+def _sales_uom_factor(item_code):
+	"""(uom, conversion_factor) the Sales Order line must use.
 
-	standard = flt(frappe.db.get_value("Item", item_code, "standard_rate"))
+	Customer schedules are in the item's Stock UOM (e.g. Nos). The Sales Order is
+	made in the item's Sales UOM (e.g. M) when it has one, and ERPNext then needs
+	the line's conversion_factor = stock units in ONE sales unit, taken from the
+	Item's UOM Conversion Detail table. With no Sales UOM, or no conversion row
+	for it, the line stays in the Stock UOM (factor 1) - never a guessed factor."""
+
+	stock_uom, sales_uom = frappe.db.get_value("Item", item_code, ["stock_uom", "sales_uom"]) or (None, None)
+	if not sales_uom or sales_uom == stock_uom:
+		return stock_uom, 1.0
+	factor = flt(
+		frappe.db.get_value("UOM Conversion Detail", {"parent": item_code, "uom": sales_uom}, "conversion_factor")
+	)
+	if factor <= 0:
+		return stock_uom, 1.0
+	return sales_uom, factor
+
+
+def _item_rate(item_code, ctx=None, uom=None, cf=1.0):
+	"""Selling rate per ONE unit of the order line's UOM, in the Sales Order's own
+	currency. Item.standard_rate is per Stock UOM and in company currency, so it
+	is multiplied by the line's conversion factor; for a foreign-currency customer
+	a rate from the customer's Selling Price List (in that currency) is preferred,
+	and otherwise standard_rate is converted with the order's exchange rate."""
+
+	cf = flt(cf) or 1.0
+	standard = flt(frappe.db.get_value("Item", item_code, "standard_rate")) * cf
 	if not ctx or ctx["currency"] == ctx["company_currency"]:
 		return standard
 
 	if ctx.get("price_list"):
-		price = frappe.db.get_value(
-			"Item Price",
-			{"item_code": item_code, "price_list": ctx["price_list"], "selling": 1, "currency": ctx["currency"]},
-			"price_list_rate",
-		)
+		base = {"item_code": item_code, "price_list": ctx["price_list"], "selling": 1, "currency": ctx["currency"]}
+		price = None
+		if uom and cf != 1:
+			price = frappe.db.get_value("Item Price", dict(base, uom=uom), "price_list_rate")  # already per this UOM
+		if not price:
+			price = frappe.db.get_value("Item Price", base, "price_list_rate")
+			price = flt(price) * cf if price else None
 		if price:
 			return flt(price)
 
@@ -312,13 +336,16 @@ def _sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, rep
 	else:
 		submitted = frappe.db.get_value("Sales Order", dict(match, docstatus=1), "name", order_by="creation desc")
 		if submitted:
-			existing_items = {
-				r.item_code: flt(r.qty)
-				for r in frappe.get_all(
-					"Sales Order Item", filters={"parent": submitted}, fields=["item_code", "qty"]
-				)
-			}
-			if existing_items == new_items:
+			# compare in stock UOM: the order line may be in the Sales UOM
+			existing_items = {}
+			for r in frappe.get_all(
+				"Sales Order Item", filters={"parent": submitted}, fields=["item_code", "qty", "stock_qty", "conversion_factor"]
+			):
+				stock_qty = flt(r.stock_qty) or flt(r.qty) * (flt(r.conversion_factor) or 1.0)
+				existing_items[r.item_code] = existing_items.get(r.item_code, 0.0) + stock_qty
+			if set(existing_items) == set(new_items) and all(
+				abs(existing_items[c] - flt(q)) <= 0.5 for c, q in new_items.items()
+			):
 				for row in rows_for_date:
 					row.linked_sales_order = submitted
 				return
@@ -348,16 +375,22 @@ def _order_date(doc, delivery_date):
 
 
 def _append_so_items(so, new_items, warehouse, delivery_date, ctx=None, fallback_rates=None):
-	for item_code, qty in new_items.items():
-		rate = _item_rate(item_code, ctx)
+	"""new_items are quantities in the item's STOCK UOM (what the customer sends).
+	Each line is written in the item's Sales UOM with its conversion factor."""
+	for item_code, stock_qty in new_items.items():
+		uom, cf = _sales_uom_factor(item_code)
+		rate = _item_rate(item_code, ctx, uom, cf)
 		if rate <= 0 and fallback_rates:
-			# an order being replaced keeps the rate it already had
-			rate = flt(fallback_rates.get(item_code))
+			# an order being replaced keeps the rate it already had (kept per stock unit)
+			rate = flt(fallback_rates.get(item_code)) * cf
 		so.append(
 			"items",
 			{
 				"item_code": item_code,
-				"qty": qty,
+				"uom": uom,
+				"conversion_factor": cf,
+				"qty": flt(flt(stock_qty) / cf, 3),
+				"stock_qty": flt(stock_qty),
 				"rate": rate,
 				"warehouse": warehouse,
 				"delivery_date": delivery_date,
@@ -395,10 +428,19 @@ def _update_draft_sales_order(existing_name, doc, delivery_date, new_items, comp
 			kept.append(line)
 	so.set("items", kept)
 	for line in so.items:
-		line.qty = new_items[line.item_code]
+		# the schedule quantity is in Stock UOM; the line is in the Sales UOM (also repairs
+		# a draft that an older version wrote with the stock quantity in the sales UOM)
+		uom, cf = _sales_uom_factor(line.item_code)
+		old_cf = flt(line.conversion_factor) or 1.0
+		if flt(line.rate) > 0 and abs(old_cf - cf) > 1e-9:
+			line.rate = flt(line.rate) / old_cf * cf  # a typed rate stays the same per stock unit
+		line.uom = uom
+		line.conversion_factor = cf
+		line.qty = flt(flt(new_items[line.item_code]) / cf, 3)
+		line.stock_qty = flt(new_items[line.item_code])
 		line.delivery_date = delivery_date
 		if flt(line.rate) <= 0:  # a rate typed into the draft is kept
-			line.rate = _item_rate(line.item_code, ctx)
+			line.rate = _item_rate(line.item_code, ctx, uom, cf)
 	_append_so_items(so, {c: q for c, q in new_items.items() if c not in seen}, warehouse, delivery_date, ctx)
 
 	so.custom_sp_customer_schedule = doc.name
@@ -412,7 +454,8 @@ def _amend_sales_order(existing_name, doc, delivery_date, new_items, company, wa
 	old_rates = {}
 	for line in old_so.items:
 		if flt(line.rate) > 0:
-			old_rates.setdefault(line.item_code, flt(line.rate))
+			# per stock unit, so it can be re-applied whatever UOM the new line uses
+			old_rates.setdefault(line.item_code, flt(line.rate) / (flt(line.conversion_factor) or 1.0))
 	if old_so.docstatus == 1:
 		old_so.flags.ignore_permissions = True
 		frappe.db.savepoint("sp_cancel_so")
