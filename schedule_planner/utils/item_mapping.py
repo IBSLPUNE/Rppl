@@ -353,7 +353,7 @@ def remap_rows(rows, item_by_part):
 		row.setdefault("file_description", r.get("item_name") or part)
 		if part in item_by_part:
 			row["item_code"] = item_by_part[part]
-		key = (row["item_code"], row["delivery_date"], row.get("demand_type"))
+		key = (row["item_code"], row["delivery_date"], row.get("demand_type"), row.get("ship_to"))
 		if key in merged:
 			merged[key]["quantity"] = float(merged[key]["quantity"]) + float(row["quantity"])
 		else:

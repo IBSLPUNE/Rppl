@@ -82,7 +82,7 @@ def _merge(rows):
 	"""Same item + date + type twice (e.g. one part under two POs): add up."""
 	merged, order = {}, []
 	for r in rows:
-		key = (r["item_code"], r["delivery_date"], r["demand_type"])
+		key = (r["item_code"], r["delivery_date"], r["demand_type"], r.get("ship_to"))  # ship_to only on layouts that print it
 		if key in merged:
 			merged[key]["quantity"] += r["quantity"]
 		else:
@@ -325,6 +325,8 @@ def parse_techform_acs(text):
 # under two POs, so rows are read per (part, PO) and merged afterwards. Only
 # non-zero releases are listed, and the due date is the last date on the line.
 
+# the ship-to plant: "Plant" is on the part line and its number ("1") wraps onto the next line, after "Components"
+_MARWOOD_PLANT = re.compile(r"\bComponents?\s+(\d+)\b")
 _MARWOOD_PART = re.compile(r"^\s*(P\w*)\s+(\d{5,7})\s+.*?\bPlant\s+(\S+)")
 # "Firm 16,000 0 pcs 0(0)pcs 16,000" or, in a wider print, "Firm 2,600 pcs 0 pcs 0(0)pcs 2,600 pcs"
 _MARWOOD_ROW = re.compile(
@@ -353,6 +355,19 @@ def _marwood_code(part, line, next_line):
 	return code
 
 
+def _marwood_plant(line, next_line):
+	"""The ship-to plant of a Marwood part line: "Plant" is printed on the line and its number
+	wraps onto the next line, sitting under the word "Plant" (a wider print) or after
+	"Components" (a narrower one). None when the number cannot be read."""
+	col = line.find("Plant")
+	if col >= 0:
+		for tok in re.finditer(r"\S+", next_line):
+			if tok.group().isdigit() and abs(tok.start() - col) <= 8:
+				return f"Plant {tok.group()}"
+	found = _MARWOOD_PLANT.search(next_line)
+	return f"Plant {found.group(1)}" if found else None
+
+
 def detect_marwood_plex(text):
 	# the title is printed in wide letters, so words can be separated by several spaces
 	return "ONLINE RELEASES TO SUPPLIERS" in " ".join(text.split()) and "Release" in text
@@ -369,11 +384,14 @@ def parse_marwood_plex(text):
 	vendor = re.search(r"Supplier\s+(\S+)", text)
 
 	rows, current, name, loose = [], None, {}, 0
+	plant = None  # ship-to plant of the part group being read
 	lines = text.splitlines()
 	for idx, line in enumerate(lines):
 		part = _MARWOOD_PART.match(line)
 		if part:
-			current = _marwood_code(part, line, lines[idx + 1] if idx + 1 < len(lines) else "")
+			next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+			current = _marwood_code(part, line, next_line)
+			plant = _marwood_plant(line, next_line)
 			if planner:
 				m = re.search(rf"{planner.group(1)}\s+(.+?)\s+(?:{_DATE}|\d)", line)
 				if m and current not in name:
@@ -387,7 +405,10 @@ def parse_marwood_plex(text):
 				m = _MARWOOD_ROW.search(line)
 				qty = _num(m.group(3))  # balance still to ship (= quantity until receipts arrive)
 				if qty > 0:
-					rows.append(_row(current, name.get(current), _d(dates[-1]), qty, m.group(1)))
+					row = _row(current, name.get(current), _d(dates[-1]), qty, m.group(1))
+					if plant:
+						row["ship_to"] = plant  # Sales Orders are made per plant (shipping address)
+					rows.append(row)
 			else:
 				return None  # a release line we could not place
 
@@ -589,7 +610,9 @@ def parse_customer_release_schedule(text, today=None):
 				_seen(starts, code, when)
 				horizon = when if horizon is None or when > horizon else horizon
 				if qty > 0:
-					rows.append(_row(code, m.group(4).strip(), when, qty, "Firm"))
+					row = _row(code, m.group(4).strip(), when, qty, "Firm")
+					row["file_uom"] = m.group(6)  # the unit the file prints ("pcs")
+					rows.append(row)
 				continue
 			m = _CRS_TOTAL.match(line)
 			if m:

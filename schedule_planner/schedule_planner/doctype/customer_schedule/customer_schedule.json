@@ -14,6 +14,9 @@
   "schedule_date",
   "horizon_end",
   "schedule_format",
+  "sales_order_mode",
+  "sales_order_uom",
+  "ship_to_addresses",
   "source_file",
   "status",
   "schedule_lines_section",
@@ -104,6 +107,32 @@
    "label": "Schedule Format Used",
    "options": "Customer Schedule Format",
    "read_only": 1
+  },
+  {
+   "default": "Delivery Date Wise",
+   "fieldname": "sales_order_mode",
+   "fieldtype": "Select",
+   "label": "Sales Order Mode",
+   "options": "Delivery Date Wise\nCombined",
+   "no_copy": 1,
+   "description": "Delivery Date Wise: one Sales Order per delivery date (default). Combined: one Sales Order for all Firm delivery dates. Set before Submit."
+  },
+  {
+   "fieldname": "sales_order_uom",
+   "fieldtype": "Link",
+   "label": "Sales Order UOM",
+   "options": "UOM",
+   "no_copy": 1,
+   "description": "UOM for every Sales Order line of this schedule (the Item needs a conversion for it). Blank = each item's own Sales UOM. Set before Submit."
+  },
+  {
+   "depends_on": "eval:doc.ship_to_addresses && doc.ship_to_addresses.length",
+   "description": "The file names a ship-to plant per line. Sales Orders are made per plant with that plant's Shipping Address. Fill any blank address before Submit.",
+   "fieldname": "ship_to_addresses",
+   "fieldtype": "Table",
+   "label": "Ship-To Addresses",
+   "no_copy": 1,
+   "options": "Customer Schedule Ship To"
   },
   {
    "fieldname": "source_file",
@@ -288,7 +317,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-01-01 00:00:00.000000",
+ "modified": "2026-11-25 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Schedule Planner",
  "name": "Customer Schedule",

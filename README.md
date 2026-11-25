@@ -255,15 +255,47 @@ rolled off the front are not logged as "removed".
 
 Excel `.xls` (old format) needs the `xlrd` package: `bench pip install xlrd`.
 
-## Sales UOM (Nos in the schedule, Metres on the order)
+## Sales Order grouping and UOM
 
-Customer schedules are read in the item's **Stock UOM** (e.g. Nos). When the Item has a different
-**Sales UOM** (e.g. M) *and* a row for it in the Item's UOM Conversion table, the Sales Order line is
-written in the Sales UOM with that conversion factor: `qty = schedule qty / factor`, `stock_qty = schedule qty`,
-and the rate is per Sales UOM (`standard_rate x factor`). If the Item has no Sales UOM, or no conversion row
-for it, the line stays in the Stock UOM - the app never guesses a factor. Quantity comparisons (is a submitted
-order already up to date?) are always made in Stock UOM. A Draft written by an older version with the wrong
-quantity is corrected on the next schedule upload.
+**Sales Order Mode** (field on the Customer Schedule, set it before Submit):
+
+- *Delivery Date Wise* (default): one Draft Sales Order per delivery date.
+- *Combined*: one Draft Sales Order for all Firm delivery dates of the schedule. Each line keeps its own
+  delivery date. On a later schedule the customer's combined Draft is updated in place; a submitted one is
+  left alone / replaced by the same processed-or-not rules as above. Orders made date-wise earlier are not
+  touched when you switch to Combined (and the other way round).
+
+**UOM.** Schedule quantities are kept in the item's **Stock UOM** (e.g. Nos). The Sales Order line is made in:
+
+1. the schedule's **Sales Order UOM** - one field on the Customer Schedule for the whole schedule (not per
+   item). It is blank by default (the file's unit is never filled in for you); leave it blank or choose one
+   before Submit. Every item needs a row for that UOM in its UOM Conversion table (stopped at Submit if not). The
+   file's "pcs" is read as Nos/Pcs when the item is counted in pieces. A file unit other than the Stock UOM is
+   converted to Stock UOM when the schedule is created; else
+2. the item's **Sales UOM** (e.g. M) with the conversion from the Item's UOM Conversion table; else
+3. the Stock UOM.
+
+The line gets `conversion_factor`, `qty = schedule qty / factor`, `stock_qty = schedule qty`, and the rate per line
+UOM (`standard_rate x factor`). A factor is never guessed: with no conversion row the line stays in Stock UOM, and
+a file unit the item cannot convert stops the upload with a message. Quantity comparisons (is a submitted order
+already up to date?) are made in Stock UOM. A Draft written by an older version with the wrong quantity is
+corrected on the next schedule upload. Files read: the Customer Release Schedule layout prints a unit; for Excel/CSV
+a column named UOM / U/M / Unit of Measure is used when present.
+
+**New Standard Corporation (Customer Release Schedule, both layouts):** every release is read as **Firm**.
+
+## Ship-to plants (Marwood)
+
+The Marwood / Plex release prints the ship-to plant of every line (Plant 1, 4, 5, 7). For such files the schedule
+gets a **Ship-To Addresses** table (one row per plant) and each schedule line shows its plant. The address is filled
+from what was used for this customer's earlier schedules, else from the customer's one Shipping Address whose name /
+title / lines name the plant ("Plant 1" never matches "Plant 10"). Fill any blank row before Submit - Submit is
+stopped until every plant has an address that belongs to the customer.
+
+Sales Orders are then made **per plant**, with that plant's Shipping Address: Delivery Date Wise = one Draft per
+(plant, date); Combined = one Draft per plant. Other customers' files print no plant, so nothing changes for them
+(no table, no address, same grouping as before). Quantities of two plants are never added together; Forecast and
+Material Request planning still work per item across plants.
 
 ## Customers billed in a foreign currency
 

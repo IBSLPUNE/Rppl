@@ -18,6 +18,8 @@ import frappe
 from frappe.utils import flt, getdate
 
 from schedule_planner.utils import file_parsers, forecast_engine, item_mapping, safety
+from schedule_planner.utils import ship_to as ship_to_utils
+from schedule_planner.utils import uom as uom_utils
 from schedule_planner.utils.items import ensure_item_exists
 
 
@@ -455,6 +457,11 @@ def create_schedule_with_forecast(
 			title="Duplicate Schedule",
 		)
 
+	# file totals are kept in the file's own units; from here on every quantity is in Stock UOM
+	included_qty = round(sum(flt(r["quantity"]) for r in rows), 2)
+	file_check = json.loads(file_check_json) if file_check_json else build_file_check(rows)
+	uom_utils.normalise_file_units(rows)  # quantities to Stock UOM; Sales Order UOM stays blank
+
 	all_rows = forecast_engine.extend_rows(
 		rows, target_months, forecast_method, selected_items=selected, item_methods=methods, customer=customer
 	)
@@ -467,10 +474,12 @@ def create_schedule_with_forecast(
 		all_rows,
 	)
 
-	included_qty = round(sum(flt(r["quantity"]) for r in rows), 2)
-	file_check = json.loads(file_check_json) if file_check_json else build_file_check(rows)
 	skipped_parts = file_check.get("skipped") or []
 	skipped_qty = round(sum(flt(s_.get("qty")) for s_ in skipped_parts), 2)
+
+	# plants the file names (only some layouts print them) and the Shipping Address for each
+	ship_to_rows = ship_to_utils.resolve(customer, sorted({r["ship_to"] for r in rows if r.get("ship_to")}))
+	unresolved = [ship_to for ship_to, address in ship_to_rows if not address]
 
 	schedule_doc = frappe.get_doc(
 		{
@@ -491,6 +500,9 @@ def create_schedule_with_forecast(
 			"schedule_date": header["schedule_date"],
 			"horizon_end": header.get("horizon_end"),
 			"schedule_format": schedule_format,
+			"ship_to_addresses": [
+				{"ship_to": ship_to, "shipping_address": address} for ship_to, address in ship_to_rows
+			],
 			"source_file": file_url,
 			"status": "Draft",
 			"schedule_items": [],
@@ -507,6 +519,7 @@ def create_schedule_with_forecast(
 				"file_part_no": row.get("file_part_no") or part_by_item.get(row["item_code"]),
 				"delivery_date": row["delivery_date"],
 				"quantity": row["quantity"],
+				"ship_to": row.get("ship_to"),
 				"demand_type": row["demand_type"],
 				"auto_forecast": row.get("auto_forecast", 0),
 				"forecast_method": label_by_item.get(row["item_code"]),
@@ -538,6 +551,11 @@ def create_schedule_with_forecast(
 			f"{forecast_engine.METHOD_LABELS[forecast_method]}. Review and Submit "
 			f"when ready - Submitting creates the Sales Order(s) as Draft (you submit them "
 			f"yourself), the Sales Forecast and (if enabled) the Material Request."
+			+ (
+				" Choose the Shipping Address for plant(s) " + ", ".join(unresolved) + " in the Ship-To Addresses table before Submit."
+				if unresolved
+				else ""
+			)
 		),
 	}
 

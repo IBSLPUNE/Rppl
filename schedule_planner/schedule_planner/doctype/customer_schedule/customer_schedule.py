@@ -6,6 +6,8 @@ from frappe.model.document import Document
 
 from schedule_planner.utils import revision as revision_utils
 from schedule_planner.utils import safety, sales_documents
+from schedule_planner.utils import ship_to as ship_to_utils
+from schedule_planner.utils import uom as uom_utils
 
 
 class CustomerSchedule(Document):
@@ -19,6 +21,8 @@ def before_submit(doc, method=None):
 	(not persisted) so on_submit can roll them into Customer Revision Stats
 	without recomputing."""
 	safety.enforce_before_submit(doc)
+	uom_utils.check_doc_uom(doc)
+	ship_to_utils.check_before_submit(doc)
 	result = revision_utils.detect_and_log_revisions(doc)
 	doc._sp_revision_result = result
 
@@ -31,8 +35,9 @@ def on_submit(doc, method=None):
 	}
 	revision_utils.apply_revision_stats(doc.customer, result, doc.name)
 
-	# Firm rows -> one Sales Order per delivery date, cancel+amend if a date's
-	# item/qty mix changed since the last schedule.
+	# Firm rows -> one Sales Order per delivery date (or one combined Sales Order, see the
+	# schedule's Sales Order Mode), cancel+amend if its item/qty mix changed since the
+	# last schedule.
 	sales_documents.sync_firm_to_sales_orders(doc)
 
 	# Forecast rows -> this customer's Sales Forecast is wholesale replaced

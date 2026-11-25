@@ -87,7 +87,7 @@ function _upload_and_analyse(frm) {
 function _show_create_dialog(frm, file_url, analysis) {
 	const available_months = parseInt(analysis.available_months || 0);
 	const default_method = analysis.default_forecast_method || "LAST_4_WEEKS_AVG";
-	const default_target = available_months + 3;
+	const default_target = available_months; // the client raises it when they want a longer forecast
 	const rows_json = JSON.stringify(analysis.parsed_rows || []);
 	const header_json = JSON.stringify(analysis.header || {});
 	const map_list = analysis.item_mapping || [];

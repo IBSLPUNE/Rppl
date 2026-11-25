@@ -23,6 +23,8 @@ from collections import defaultdict
 import frappe
 from frappe.utils import flt, getdate
 
+from schedule_planner.utils import ship_to as ship_to_utils
+
 
 # ---------------------------------------------------------------------------
 # Shared defaults
@@ -58,24 +60,30 @@ def _default_warehouse(company):
 	return warehouse
 
 
-def _sales_uom_factor(item_code):
+def _sales_uom_factor(item_code, preferred=None):
 	"""(uom, conversion_factor) the Sales Order line must use.
 
-	Customer schedules are in the item's Stock UOM (e.g. Nos). The Sales Order is
-	made in the item's Sales UOM (e.g. M) when it has one, and ERPNext then needs
-	the line's conversion_factor = stock units in ONE sales unit, taken from the
-	Item's UOM Conversion Detail table. With no Sales UOM, or no conversion row
-	for it, the line stays in the Stock UOM (factor 1) - never a guessed factor."""
+	Schedule quantities are in the item's Stock UOM (e.g. Nos). The line is made in
+	  1. `preferred` - the schedule's Sales Order UOM (from the customer's file or
+	     set by the user) - when the Item can convert it, else
+	  2. the item's Sales UOM (e.g. M), else
+	  3. the Stock UOM.
+	conversion_factor = stock units in ONE line unit, taken from the Item's UOM
+	Conversion Detail table; with no conversion row the line stays in Stock UOM
+	(factor 1) - a factor is never guessed."""
 
 	stock_uom, sales_uom = frappe.db.get_value("Item", item_code, ["stock_uom", "sales_uom"]) or (None, None)
-	if not sales_uom or sales_uom == stock_uom:
-		return stock_uom, 1.0
-	factor = flt(
-		frappe.db.get_value("UOM Conversion Detail", {"parent": item_code, "uom": sales_uom}, "conversion_factor")
-	)
-	if factor <= 0:
-		return stock_uom, 1.0
-	return sales_uom, factor
+	for uom in (preferred, sales_uom):
+		if not uom:
+			continue
+		if uom == stock_uom:
+			return stock_uom, 1.0
+		factor = flt(
+			frappe.db.get_value("UOM Conversion Detail", {"parent": item_code, "uom": uom}, "conversion_factor")
+		)
+		if factor > 0:
+			return uom, factor
+	return stock_uom, 1.0
 
 
 def _item_rate(item_code, ctx=None, uom=None, cf=1.0):
@@ -178,8 +186,13 @@ def _item_uom(item_code):
 # Firm rows -> one Sales Order per delivery date
 # ---------------------------------------------------------------------------
 
+SO_MODE_BY_DATE = "Delivery Date Wise"
+SO_MODE_COMBINED = "Combined"
+
+
 def sync_firm_to_sales_orders(doc):
-	"""One Sales Order per delivery date. Every order is left as a DRAFT: it is
+	"""One Sales Order per delivery date (default), or - when the schedule's Sales
+	Order Mode is "Combined" - one Sales Order for all Firm delivery dates. Every order is left as a DRAFT: it is
 	created / updated here but never submitted by the system - the user reviews
 	it (and sets any missing rate) and submits it by hand.
 
@@ -198,13 +211,28 @@ def sync_firm_to_sales_orders(doc):
 	company = _default_company()
 	warehouse = _default_warehouse(company)
 
-	by_date = defaultdict(list)
-	for row in firm_rows:
-		by_date[str(row.delivery_date)].append(row)
-
 	report = {"submitted": [], "draft": [], "locked": [], "replaced": []}
-	for delivery_date, rows_for_date in by_date.items():
-		_sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, report)
+	combined = (doc.get("sales_order_mode") or SO_MODE_BY_DATE) == SO_MODE_COMBINED
+
+	# Files that name a ship-to plant (Marwood): one group per plant, each with that plant's
+	# Shipping Address. Files that do not: one group with no address - exactly as before.
+	plants = ship_to_utils.address_map(doc)
+	by_address = defaultdict(list)
+	for row in firm_rows:
+		address = plants.get(ship_to_utils.norm(row.ship_to)) if row.get("ship_to") else None
+		by_address[address].append(row)
+
+	for address, rows_of_address in by_address.items():
+		if combined:
+			# one Sales Order for every Firm delivery date (each line keeps its own date)
+			first = min(str(r.delivery_date) for r in rows_of_address)
+			_sync_one_date_so(doc, first, rows_of_address, company, warehouse, report, combined=True, address=address)
+		else:
+			by_date = defaultdict(list)
+			for row in rows_of_address:
+				by_date[str(row.delivery_date)].append(row)
+			for delivery_date, rows_for_date in by_date.items():
+				_sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, report, address=address)
 
 	_report_draft_orders(report)
 
@@ -315,53 +343,92 @@ def _is_processed(so_name):
 	return False
 
 
-def _sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, report=None):
+def _shipping_address_display(address):
+	try:
+		from frappe.contacts.doctype.address.address import get_address_display
+
+		return get_address_display(address)
+	except Exception:
+		return None
+
+
+def _set_shipping_address(so, address):
+	"""Plant Sales Orders carry the plant's Shipping Address; others are left as ERPNext fills them."""
+	if address:
+		so.shipping_address_name = address
+		so.shipping_address = _shipping_address_display(address)
+
+
+def _line_key(item_code, delivery_date):
+	return (item_code, str(delivery_date))
+
+
+def _sync_one_date_so(doc, delivery_date, rows_for_date, company, warehouse, report=None, combined=False, address=None):
+	"""delivery_date = the order's date (the earliest date when `combined`). Lines are
+	keyed by (item, date) so a combined order can hold the same item on several dates."""
 	report = report if report is not None else {"submitted": [], "draft": [], "locked": []}
 	report.setdefault("locked", [])
 	report.setdefault("replaced", [])
 	new_items = {}
 	for row in rows_for_date:
-		new_items[row.item_code] = flt(new_items.get(row.item_code, 0)) + flt(row.quantity)
+		entry = new_items.setdefault(_line_key(row.item_code, row.delivery_date), {"qty": 0.0, "uom": None})
+		entry["qty"] += flt(row.quantity)
+		entry["uom"] = doc.get("sales_order_uom")  # one UOM for the whole schedule (None = each item's Sales UOM)
+	label = _date_label(rows_for_date) if combined else delivery_date
+	if address:
+		label = f"{label} - {address}"
 
-	# only Sales Orders this app made for this customer and date are ever looked at
-	match = {
-		"customer": doc.customer,
-		"custom_sp_is_schedule_generated": 1,
-		"custom_sp_delivery_date": delivery_date,
-	}
+	# only Sales Orders this app made for this customer are ever looked at: the one for this
+	# date, or - combined - the one with no single date
+	match = {"customer": doc.customer, "custom_sp_is_schedule_generated": 1}
+	match["custom_sp_delivery_date"] = ["is", "not set"] if combined else delivery_date
+	if address:
+		match["shipping_address_name"] = address  # a plant has its own order; with no plant the filter is not used
 	draft = frappe.db.get_value("Sales Order", dict(match, docstatus=0), "name", order_by="creation desc")
 	if draft:
 		# a Draft: bring its lines up to this schedule, keep any rate that was typed in
-		so_name = _update_draft_sales_order(draft, doc, delivery_date, new_items, company, warehouse, report)
+		so_name = _update_draft_sales_order(
+			draft, doc, delivery_date, new_items, company, warehouse, report, combined, label, address
+		)
 	else:
 		submitted = frappe.db.get_value("Sales Order", dict(match, docstatus=1), "name", order_by="creation desc")
 		if submitted:
 			# compare in stock UOM: the order line may be in the Sales UOM
 			existing_items = {}
 			for r in frappe.get_all(
-				"Sales Order Item", filters={"parent": submitted}, fields=["item_code", "qty", "stock_qty", "conversion_factor"]
+				"Sales Order Item",
+				filters={"parent": submitted},
+				fields=["item_code", "delivery_date", "qty", "stock_qty", "conversion_factor"],
 			):
 				stock_qty = flt(r.stock_qty) or flt(r.qty) * (flt(r.conversion_factor) or 1.0)
-				existing_items[r.item_code] = existing_items.get(r.item_code, 0.0) + stock_qty
+				key = _line_key(r.item_code, r.delivery_date)
+				existing_items[key] = existing_items.get(key, 0.0) + stock_qty
 			if set(existing_items) == set(new_items) and all(
-				abs(existing_items[c] - flt(q)) <= 0.5 for c, q in new_items.items()
+				abs(existing_items[k] - flt(v["qty"])) <= 0.5 for k, v in new_items.items()
 			):
 				for row in rows_for_date:
 					row.linked_sales_order = submitted
 				return
 			# differs from the schedule: replace it only if nothing has been done with it yet
 			if _is_processed(submitted):
-				report["locked"].append((submitted, delivery_date))
+				report["locked"].append((submitted, label))
 				return
-			so_name = _amend_sales_order(submitted, doc, delivery_date, new_items, company, warehouse, report)
+			so_name = _amend_sales_order(
+				submitted, doc, delivery_date, new_items, company, warehouse, report, combined, label, address
+			)
 			if not so_name:  # could not be cancelled (a link ERPNext knows about): left as it is
-				report["locked"].append((submitted, delivery_date))
+				report["locked"].append((submitted, label))
 				return
 		else:
-			so_name = _create_sales_order(doc, delivery_date, new_items, company, warehouse, report)
+			so_name = _create_sales_order(doc, delivery_date, new_items, company, warehouse, report, combined, label, address)
 
 	for row in rows_for_date:
 		row.linked_sales_order = so_name
+
+
+def _date_label(rows):
+	dates = sorted({str(r.delivery_date) for r in rows})
+	return dates[0] if len(dates) == 1 else f"{dates[0]} to {dates[-1]} ({len(dates)} dates)"
 
 
 def _order_date(doc, delivery_date):
@@ -374,11 +441,12 @@ def _order_date(doc, delivery_date):
 	return min(order_date, getdate(delivery_date))
 
 
-def _append_so_items(so, new_items, warehouse, delivery_date, ctx=None, fallback_rates=None):
-	"""new_items are quantities in the item's STOCK UOM (what the customer sends).
-	Each line is written in the item's Sales UOM with its conversion factor."""
-	for item_code, stock_qty in new_items.items():
-		uom, cf = _sales_uom_factor(item_code)
+def _append_so_items(so, new_items, warehouse, ctx=None, fallback_rates=None):
+	"""new_items: {(item_code, delivery_date): {"qty": quantity in the item's STOCK UOM,
+	"uom": UOM the line must be in, or None for the item's Sales UOM}}."""
+	for (item_code, delivery_date), entry in new_items.items():
+		stock_qty = flt(entry["qty"])
+		uom, cf = _sales_uom_factor(item_code, entry.get("uom"))
 		rate = _item_rate(item_code, ctx, uom, cf)
 		if rate <= 0 and fallback_rates:
 			# an order being replaced keeps the rate it already had (kept per stock unit)
@@ -389,8 +457,8 @@ def _append_so_items(so, new_items, warehouse, delivery_date, ctx=None, fallback
 				"item_code": item_code,
 				"uom": uom,
 				"conversion_factor": cf,
-				"qty": flt(flt(stock_qty) / cf, 3),
-				"stock_qty": flt(stock_qty),
+				"qty": flt(stock_qty / cf, 3),
+				"stock_qty": stock_qty,
 				"rate": rate,
 				"warehouse": warehouse,
 				"delivery_date": delivery_date,
@@ -398,7 +466,9 @@ def _append_so_items(so, new_items, warehouse, delivery_date, ctx=None, fallback
 		)
 
 
-def _create_sales_order(doc, delivery_date, new_items, company, warehouse, report=None):
+def _create_sales_order(
+	doc, delivery_date, new_items, company, warehouse, report=None, combined=False, label=None, address=None
+):
 	report = report if report is not None else {"submitted": [], "draft": []}
 	so = frappe.new_doc("Sales Order")
 	so.customer = doc.customer
@@ -406,49 +476,60 @@ def _create_sales_order(doc, delivery_date, new_items, company, warehouse, repor
 	so.transaction_date = _order_date(doc, delivery_date)
 	so.delivery_date = delivery_date
 	so.custom_sp_is_schedule_generated = 1
-	so.custom_sp_delivery_date = delivery_date
+	so.custom_sp_delivery_date = None if combined else delivery_date
 	so.custom_sp_customer_schedule = doc.name
+	_set_shipping_address(so, address)
 
 	ctx = _currency_context(doc.customer, company, so.transaction_date)
 	_apply_currency(so, ctx)
-	_append_so_items(so, new_items, warehouse, delivery_date, ctx)
+	_append_so_items(so, new_items, warehouse, ctx)
 
 	so.insert(ignore_permissions=True)
-	return _finish_sales_order(so, delivery_date, report)
+	return _finish_sales_order(so, label or delivery_date, report)
 
 
-def _update_draft_sales_order(existing_name, doc, delivery_date, new_items, company, warehouse, report):
+def _update_draft_sales_order(
+	existing_name, doc, delivery_date, new_items, company, warehouse, report, combined=False, label=None, address=None
+):
 	so = frappe.get_doc("Sales Order", existing_name)
 	ctx = _currency_context(doc.customer, company, so.transaction_date)
 
 	kept, seen = [], set()
 	for line in so.items:
-		if line.item_code in new_items and line.item_code not in seen:
-			seen.add(line.item_code)
+		key = _line_key(line.item_code, line.delivery_date)
+		if key in new_items and key not in seen:
+			seen.add(key)
 			kept.append(line)
 	so.set("items", kept)
 	for line in so.items:
-		# the schedule quantity is in Stock UOM; the line is in the Sales UOM (also repairs
-		# a draft that an older version wrote with the stock quantity in the sales UOM)
-		uom, cf = _sales_uom_factor(line.item_code)
+		key = _line_key(line.item_code, line.delivery_date)
+		stock_qty = flt(new_items[key]["qty"])
+		# the schedule quantity is in Stock UOM; the line is in the row's UOM / the Sales UOM (also
+		# repairs a draft that an older version wrote with the stock quantity in the sales UOM)
+		uom, cf = _sales_uom_factor(line.item_code, new_items[key].get("uom"))
 		old_cf = flt(line.conversion_factor) or 1.0
 		if flt(line.rate) > 0 and abs(old_cf - cf) > 1e-9:
 			line.rate = flt(line.rate) / old_cf * cf  # a typed rate stays the same per stock unit
 		line.uom = uom
 		line.conversion_factor = cf
-		line.qty = flt(flt(new_items[line.item_code]) / cf, 3)
-		line.stock_qty = flt(new_items[line.item_code])
-		line.delivery_date = delivery_date
+		line.qty = flt(stock_qty / cf, 3)
+		line.stock_qty = stock_qty
 		if flt(line.rate) <= 0:  # a rate typed into the draft is kept
 			line.rate = _item_rate(line.item_code, ctx, uom, cf)
-	_append_so_items(so, {c: q for c, q in new_items.items() if c not in seen}, warehouse, delivery_date, ctx)
+	_append_so_items(so, {k: v for k, v in new_items.items() if k not in seen}, warehouse, ctx)
 
+	so.delivery_date = delivery_date
+	if combined and getdate(so.transaction_date) > getdate(delivery_date):
+		so.transaction_date = _order_date(doc, delivery_date)
 	so.custom_sp_customer_schedule = doc.name
+	_set_shipping_address(so, address)
 	so.save(ignore_permissions=True)
-	return _finish_sales_order(so, delivery_date, report)
+	return _finish_sales_order(so, label or delivery_date, report)
 
 
-def _amend_sales_order(existing_name, doc, delivery_date, new_items, company, warehouse, report=None):
+def _amend_sales_order(
+	existing_name, doc, delivery_date, new_items, company, warehouse, report=None, combined=False, label=None, address=None
+):
 	report = report if report is not None else {"submitted": [], "draft": []}
 	old_so = frappe.get_doc("Sales Order", existing_name)
 	old_rates = {}
@@ -473,17 +554,18 @@ def _amend_sales_order(existing_name, doc, delivery_date, new_items, company, wa
 	amended.transaction_date = _order_date(doc, delivery_date)
 	amended.delivery_date = delivery_date
 	amended.custom_sp_is_schedule_generated = 1
-	amended.custom_sp_delivery_date = delivery_date
+	amended.custom_sp_delivery_date = None if combined else delivery_date
 	amended.custom_sp_customer_schedule = doc.name
+	_set_shipping_address(amended, address)
 	amended.items = []
 
 	ctx = _currency_context(doc.customer, company, amended.transaction_date)
 	_apply_currency(amended, ctx)
-	_append_so_items(amended, new_items, warehouse, delivery_date, ctx, fallback_rates=old_rates)
+	_append_so_items(amended, new_items, warehouse, ctx, fallback_rates=old_rates)
 
 	amended.insert(ignore_permissions=True)
-	report.setdefault("replaced", []).append((existing_name, amended.name, delivery_date))
-	return _finish_sales_order(amended, delivery_date, report)
+	report.setdefault("replaced", []).append((existing_name, amended.name, label or delivery_date))
+	return _finish_sales_order(amended, label or delivery_date, report)
 
 
 # ---------------------------------------------------------------------------

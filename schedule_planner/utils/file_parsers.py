@@ -198,6 +198,8 @@ def _get_or_create_format(customer, file_type):
 # Excel / CSV - template mapping or header-keyword auto-detect
 # ---------------------------------------------------------------------------
 
+_UOM_HEADERS = {"uom", "u/m", "um", "unit of measure", "unit of measurement"}  # not plain "unit": too often a plant/site
+
 _HEADER_KEYWORDS = {
 	"item_code": ["item code", "part number", "part no", "item", "material", "sku"],
 	"item_name": ["item name", "description", "part name", "material description"],
@@ -246,6 +248,9 @@ def _parse_tabular(file_path, fmt):
 		if match:
 			col_by_target[target] = match
 
+	# an optional unit-of-measure column ("UOM", "Unit", "U/M" ...) is picked up by its name
+	uom_col = next((c for c in df.columns if str(c).strip().lower() in _UOM_HEADERS), None)
+
 	rows = []
 	starts = {}
 	for _, r in df.iterrows():
@@ -276,6 +281,9 @@ def _parse_tabular(file_path, fmt):
 				"demand_type": demand_type,
 			}
 		)
+		unit = str(r.get(uom_col, "") or "").strip() if uom_col else ""
+		if unit and unit.lower() != "nan":
+			rows[-1]["file_uom"] = unit
 
 	return _stamp_starts(rows, starts)
 
